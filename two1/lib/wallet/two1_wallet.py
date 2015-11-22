@@ -513,7 +513,7 @@ class Two1Wallet(BaseWallet):
         return rv
 
     def _init_account(self, index,
-                      name="", account_state=None, skip_discovery=False):
+                      name="", account_state=None, skip_discovery=False, cache_manager=None):
         # Account keys use hardened deriviation, so make sure the MSB is set
         acct_index = index | 0x80000000
 
