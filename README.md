@@ -17,20 +17,8 @@
   2121212121212121212121212121212 
   21212121212121212121212121212 
 ````
-Out of the box Python3 library (used in 21 Bitcoin Computer 1.0.0)
+Two1 Python3 library + other files ~~1.0.0~~ 2.0.1 (Nov 28 2015)
 
-
-#why?
-* port to linux?
-* play around while waiting for 21 bitcoin computer to arrive?
-* procrastinating other stuff?
-
-
-# Requirements:
-```
-pip3 install -r two1/requirment.txt
-```
-and probably more, if porting is the goal
 
 
 
@@ -46,3 +34,15 @@ Author-email: 21@21.co
 License: MIT
 Description: ``two1``: buy/sell anything on the internet with Bitcoin.
 ````
+```
+Package: two1
+Version: 2.0.1-1
+Architecture: all
+Maintainer: 21 <21@21.co>
+Installed-Size: 840
+Depends: python3, python3-arrow, python3-click, python3-pytest, python3-requests, python3-responses, python3-simplejson, python3:any (>= 3.3.2-2~), libpam-systemd, python3-pyaes, python3-base58, python3-jsonrpcclient, python3-jsonrpcserver, python3-path.py, python3-tabulate, python3-sha256, python3-mnemonic, python3-protobuf, python3-funcsigs
+Section: python
+Priority: optional
+Description: Buy and sell anything on the internet with Bitcoin.
+ ``two1``: buy/sell anything on the internet with Bitcoin.
+```
