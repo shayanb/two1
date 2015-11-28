@@ -2,7 +2,22 @@ import click
 
 
 class UxString:
+
+    # general
+    update_required = "You are using an old version of 21. Please update using the '21 " \
+                      "update' command."
+    bitcoin_computer_needed = "You need a 21 Bitcoin Computer (21.co/buy) to access " \
+                              "this service. If you believe you have received this " \
+                              "message in error, please contact support@21.co."
+    max_accounts_reached = click.style(
+        "You have reached the maximum number of 21.co accounts that you can create on "
+        "this Bitcoin Computer. Use ",
+        fg="red") + click.style(
+        "21 login", fg="red", bold=True) + click.style(
+        " to switch between your available accounts.",
+        fg="red")
     # account creation
+
     creating_account = "Creating 21.co account. Username: %s."
     missing_account = "Looks like you do not have a 21.co account. Let's create one..."
 
@@ -32,6 +47,13 @@ class UxString:
         "Estimated time of payout: ~20 minutes.\n"\
         "To check progress:  https://blockexplorer.com/address/{}\n"\
         "To get more bitcoin, use {}."
+
+    # account recovery
+    registered_usernames_title = "\nRegistered usernames: \n"
+    login_prompt = "\nPlease select the number associated with the username you want to " \
+                   "log in with"
+    login_prompt_invalid_user = "Please select a number between {} and {} to select the " \
+                                "corresponding username"
 
     # status
     status_exit_message = "\nUse {} to buy API calls for bitcoin from 21.co.\nFor help, do {}."
@@ -93,12 +115,8 @@ class UxString:
     mining_status = "\nHere's the new status of your balance after mining:\n"
     mining_finish = "\nView your balance with {}, or spend with {}."
 
-    mining_advance_not_possible = "\nFurther advances against your Bitcoin Computer " \
-                                  "work are not possible at this time. Please try again " \
-                                  "in a few of hours."
-    mining_limit_reached = "\nYou have reached the daily limit for getting advances " \
-                           "against your Bitcoin Computer work. Please try again in a " \
-                           "few of hours"
+    mining_limit_reached = "\nFurther mining advances are not possible at this time. " \
+                           "Please try again in a few hours"
 
     # updater
     update_check = "Checking for application updates..."
@@ -113,7 +131,7 @@ class UxString:
     flush_insufficient_earnings = "You must have a minimum of 20000 Satoshis to " \
                                   "be able to flush your earnings to the Blockchain"
     # ad
-    buy_ad = "Get a 21 Bitcoin Computer at 21.co/buy"
+    buy_ad = "Get a 21 Bitcoin Computer at https://21.co/buy"
 
     # log
     reasons = {
@@ -139,6 +157,10 @@ class UxString:
 
     buy_message = "You bought {} from {}"
     sell_message = "You sold {} to {}"
+
+    # join
+    successful_join = "Joined network {}"
+    invalid_network = "Invalid network specified, please verify the network name"
 
     # publish
     coming_soon = click.style("Coming soon", bold=True)
@@ -199,6 +221,8 @@ For further information, please contact %s""" % \
         # Updater
         update_failed = "Error occured during update process. Please try to run a manual update."
         version_not_found = "Did not find version {}."
+        retry_update_after_reboot = "Could not stop Wallet Daemon. Please reboot your system and retry 21 update."
+
         invalid_username = "Invalid username. Username must be alphanumeric and between 5-32 characters."
         invalid_email = "Invalid email address."
         update_server_connection = "Could not connect to the update server. Please try again later."

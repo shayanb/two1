@@ -9,7 +9,6 @@ documentation dynamically updates based on this name.
 """
 import sys
 import platform
-
 import locale
 import click
 from path import path
@@ -17,15 +16,17 @@ from two1.commands.config import Config
 from two1.commands.config import TWO1_CONFIG_FILE
 from two1.commands.config import TWO1_VERSION
 from two1.lib.blockchain.exceptions import DataProviderUnavailableError
+from two1.lib.blockchain.exceptions import DataProviderError
 from two1.lib.server.login import check_setup_twentyone_account
 from two1.lib.util.decorators import docstring_parameter
-from two1.lib.util.exceptions import TwoOneError
+from two1.lib.util.exceptions import TwoOneError, UnloggedException
 from two1.lib.util.uxstring import UxString
 # from two1.commands.update import update_two1_package
 from two1.commands.buy import buy
 from two1.commands.doctor import doctor
 from two1.commands.mine import mine
 from two1.commands.log import log
+from two1.commands.login import login
 from two1.commands.help import help
 from two1.commands.status import status
 from two1.commands.update import update
@@ -35,6 +36,8 @@ from two1.commands.search import search
 from two1.commands.rate import rate
 from two1.commands.sell import sell
 from two1.commands.publish import publish
+from two1.commands.join import join
+
 
 CLI_NAME = str(path(sys.argv[0]).name)
 CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help'])
@@ -70,22 +73,23 @@ For further details on how you can use your mined bitcoin to buy digital
 goods both at the command line and programmatically, visit 21.co/learn
 """
     create_wallet_and_account = ctx.invoked_subcommand not in \
-        ('help', 'update', 'publish', 'sell', 'rate', 'search')
+                                ('help', 'update', 'publish', 'sell', 'rate', 'search',
+                                 'login')
     try:
-      cfg = Config(config_file, config, create_wallet=create_wallet_and_account)
-    except DataProviderUnavailableError as e:
-      raise TwoOneError(UxString.Error.connection_cli)
+        cfg = Config(config_file, config, create_wallet=create_wallet_and_account)
+    except DataProviderUnavailableError:
+        raise TwoOneError(UxString.Error.connection_cli)
+    except DataProviderError:
+        raise TwoOneError(UxString.Error.server_err)
+
     if create_wallet_and_account:
-        check_setup_twentyone_account(cfg)
-        # Disable the auto updater for now.
-        # Todo: This needs to be switched on for the prod channel only.
-        if cfg.auto_update:
-            update_data = update_two1_package(cfg)
-            if update_data["update_successful"]:
-                # TODO: This should exit the CLI and run the same command using the
-                # newly installed software
-                pass
+        try:
+            check_setup_twentyone_account(cfg)
+        except UnloggedException:
+            sys.exit(1)
+
     ctx.obj = dict(config=cfg)
+
 
 main.add_command(buy)
 main.add_command(doctor)
@@ -100,6 +104,8 @@ main.add_command(search)
 main.add_command(rate)
 main.add_command(sell)
 main.add_command(publish)
+main.add_command(login)
+main.add_command(join)
 
 if __name__ == "__main__":
     if platform.system() == 'Windows':

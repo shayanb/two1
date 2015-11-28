@@ -93,16 +93,7 @@ class HDAccount(object):
             found_last = False
             current_last = self.last_indices[change]
 
-            # Check the txn cache to see which address is the last
-            # we have information for.
-            addr = self.get_address(change, current_last)
-            addr_has_txns = self._cache_manager.address_has_txns(addr)
-            while not addr_has_txns and current_last >= 0:
-                current_last -= 1
-                addr = self.get_address(change, current_last)
-                addr_has_txns = self._cache_manager.address_has_txns(addr)
-
-            addr_range = 0 if check_all else current_last
+            addr_range = 0
             while not found_last:
                 # Try a 2 * GAP_LIMIT at a go
                 end = addr_range + self.DISCOVERY_INCREMENT
@@ -110,10 +101,11 @@ class HDAccount(object):
                              for i in range(addr_range, end)}
 
                 if self.data_provider.can_limit_by_height:
+                    min_block = None if check_all else self._cache_manager.last_block
                     txns = self.data_provider.get_transactions(
                         list(addresses.values()),
                         limit=10000,
-                        min_block=self._cache_manager.last_block)
+                        min_block=min_block)
                 else:
                     txns = self.data_provider.get_transactions(
                         list(addresses.values()),
@@ -287,7 +279,7 @@ class HDAccount(object):
             need_new = True
 
         if need_new:
-            ret = self.get_public_key(change) if key else self.get_address(change)
+            ret = self.get_public_key(change) if key else self.get_address(change, last_index + 1)
         else:
             ret = self.get_public_key(change, last_index) if key else current_addr
 
@@ -382,23 +374,3 @@ class HDAccount(object):
                               for i in range(last + 1)]
 
         return all_addresses
-
-    @property
-    def current_change_address(self):
-        """ Returns the current change address
-
-        Returns:
-            str: Base58Check-encoded string containing the current
-               change address.
-        """
-        return self.get_address(True, self.last_indices[self.CHANGE_CHAIN])
-
-    @property
-    def current_payout_address(self):
-        """ Returns the current payout address
-
-        Returns:
-            str: Base58Check-encoded string containing the current
-               payout address.
-        """
-        return self.get_address(False, self.last_indices[self.PAYOUT_CHAIN])

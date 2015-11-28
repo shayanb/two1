@@ -3,6 +3,7 @@ import getpass
 import inspect
 import json
 import logging
+import random
 import time
 
 import base64
@@ -190,7 +191,7 @@ class Two1Wallet(BaseWallet):
         wallet_path = os.path.abspath(os.path.expanduser(wallet_path))
         wallet_dirname = os.path.dirname(wallet_path)
         if not os.path.exists(wallet_dirname):
-            os.makedirs(wallet_dirname)
+            os.makedirs(wallet_dirname, mode=0o700)
         else:
             if os.path.exists(wallet_path):
                 Two1Wallet.logger.error(
@@ -220,9 +221,21 @@ class Two1Wallet(BaseWallet):
 
     @staticmethod
     def _encrypt_str(s, key):
+        _s = ""
+        if isinstance(s, bytes):
+            try:
+                _s = s.decode('ascii')
+            except UnicodeDecodeError:
+                raise TypeError("s contains non-ASCII characters")
+        elif isinstance(s, str):
+            if not all([ord(c) for c in s]):
+                raise TypeError("s contains non-ASCII characters")
+            else:
+                _s = s
+
         iv = utils.rand_bytes(Two1Wallet.AES_BLOCK_SIZE)
-        encrypter = pyaes.Encrypter(pyaes.AESModeOfOperationCBC(key, iv = iv))
-        msg_enc = encrypter.feed(str.encode(s))
+        encrypter = pyaes.Encrypter(pyaes.AESModeOfOperationCBC(key, iv=iv))
+        msg_enc = encrypter.feed(str.encode(_s))
         msg_enc += encrypter.feed()
         return base64.b64encode(iv + msg_enc).decode('ascii')
 
@@ -230,10 +243,10 @@ class Two1Wallet(BaseWallet):
     def _decrypt_str(enc, key):
         enc_bytes = base64.b64decode(enc)
         iv = enc_bytes[:Two1Wallet.AES_BLOCK_SIZE]
-        decrypter = pyaes.Decrypter(pyaes.AESModeOfOperationCBC(key, iv = iv))
+        decrypter = pyaes.Decrypter(pyaes.AESModeOfOperationCBC(key, iv=iv))
         dec = decrypter.feed(enc_bytes[Two1Wallet.AES_BLOCK_SIZE:])
         dec += decrypter.feed()
-        return dec.rstrip(b'\x00').decode('ascii')
+        return dec.decode('ascii')
 
     @staticmethod
     def encrypt(master_key, master_seed, passphrase, key_salt):
@@ -282,7 +295,14 @@ class Two1Wallet(BaseWallet):
         # 2. First account
         # Store info to file
         account_type = "BIP44Testnet" if testnet else account_type
-        master_key, mnemonic = HDPrivateKey.master_key_from_entropy(passphrase)
+        good = False
+        while not good:
+            try:
+                master_key, mnemonic = HDPrivateKey.master_key_from_entropy(passphrase)
+                good = True
+            except ValueError:
+                pass
+
         passphrase_hash = PBKDF2.crypt(passphrase)
         key_salt = utils.rand_bytes(8)
 
@@ -335,8 +355,12 @@ class Two1Wallet(BaseWallet):
                              account_types.keys())
 
         testnet = account_type == "BIP44Testnet"
-        master_key = HDPrivateKey.master_key_from_mnemonic(mnemonic,
-                                                           passphrase)
+        try:
+            master_key = HDPrivateKey.master_key_from_mnemonic(mnemonic,
+                                                               passphrase)
+        except ValueError:
+            raise exceptions.WalletError("Bad mnemonic")
+
         passphrase_hash = PBKDF2.crypt(passphrase)
         key_salt = utils.rand_bytes(8)
 
@@ -498,8 +522,7 @@ class Two1Wallet(BaseWallet):
         if name not in self._account_map:
             if self._accounts[last_index].has_txns():
                 self._init_account(index=last_index + 1,
-                                   name=name,
-                                   cache_manager=self._cache_manager)
+                                   name=name)
                 rv = name in self._account_map
             else:
                 raise exceptions.AccountCreationError(
@@ -513,7 +536,7 @@ class Two1Wallet(BaseWallet):
         return rv
 
     def _init_account(self, index,
-                      name="", account_state=None, skip_discovery=False, cache_manager=None):
+                      name="", account_state=None, skip_discovery=False):
         # Account keys use hardened deriviation, so make sure the MSB is set
         acct_index = index | 0x80000000
 
@@ -756,12 +779,15 @@ class Two1Wallet(BaseWallet):
         dirname = ""
         if isinstance(file_or_filename, str):
             dirname = os.path.dirname(file_or_filename)
-            with open(file_or_filename, 'wb') as f:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+            with os.fdopen(os.open(file_or_filename, flags=flags,
+                                   mode=0o700), 'wb') as f:
                 f.write(d)
             self._filename = file_or_filename
         else:
             # Assume it's file-like
             dirname = os.path.dirname(file_or_filename.name)
+            self._filename = file_or_filename.name
             file_or_filename.write(d)
 
         self._cache_manager.to_file(cache_file, force_cache_write)
@@ -1043,7 +1069,16 @@ class Two1Wallet(BaseWallet):
         Returns:
             list(WalletTransaction): A list of WalletTransaction objects
         """
-        total_amount = sum([amt for amt in addresses_and_amounts.values()])
+        total_amount = 0
+        # Add up total amount & check for any outputs that are below
+        # the dust limit as they would make the transaction non-standard
+        for addr, amount in addresses_and_amounts.items():
+            if amount <= Two1Wallet.DUST_LIMIT:
+                raise ValueError(
+                    "Can't send %d satoshis to %s: amount is below dust limit!" %
+                    (amount, addr))
+            total_amount += amount
+
 
         if not accounts:
             accts = self._accounts
@@ -1117,7 +1152,10 @@ class Two1Wallet(BaseWallet):
         change = total_utxo_amount - total_with_fees
         if change > self.DUST_LIMIT:
             _, change_key_hash = utils.address_to_key_hash(accts[0].get_next_address(True))
-            outputs.append(TransactionOutput(value=change,
+            # Pick a random location to put the change output in
+            insert_index = random.randint(0, len(outputs))
+            outputs.insert(insert_index,
+                           TransactionOutput(value=change,
                                              script=Script.build_p2pkh(change_key_hash)))
 
         txn = WalletTransaction(version=Transaction.DEFAULT_TRANSACTION_VERSION,
@@ -1516,6 +1554,109 @@ class Two1Wallet(BaseWallet):
 
         return rv
 
+    def _create_txn_history_record(self, txid, acct_addrs):
+        txc = self._cache_manager._txn_cache
+        include = False
+        wt = txc[txid]
+        wt_addrs = wt.get_addresses(self._testnet)
+
+        values = dict(inputs=0, outputs=0,
+                      internal_inputs=0, internal_outputs=0)
+        txid_dict = dict(txid=txid,
+                         time=wt.network_time,
+                         block=wt.block,
+                         block_hash=str(wt.block_hash),
+                         deposits=[],
+                         spends=[])
+        for i, inp_addrs in enumerate(wt_addrs['inputs']):
+            for in_addr in inp_addrs:
+                if in_addr in acct_addrs:
+                    acct = acct_addrs[in_addr][0].name
+                    addr_type = 'change' if acct_addrs[in_addr][1] == 1 else 'payout'
+                    # Lookup the value for the corresponding output
+                    o = wt.inputs[i].outpoint
+                    o_index = wt.inputs[i].outpoint_index
+                    value = self._cache_manager._outputs_cache[str(o)][o_index]['output'].value
+                    values["inputs"] += value
+
+                    txid_dict['spends'].append(
+                        dict(address=in_addr,
+                             value=value,
+                             acct=acct,
+                             addr_type=addr_type))
+                    include = True
+                    values["internal_inputs"] += value
+
+        for o, out_addrs in enumerate(wt_addrs['outputs']):
+            for out_addr in out_addrs:
+                values["outputs"] += wt.outputs[o].value
+                if out_addr in acct_addrs:
+                    acct = acct_addrs[out_addr][0].name
+                    addr_type = 'change' if acct_addrs[out_addr][1] == 1 else 'payout'
+
+                    txid_dict['deposits'].append(
+                        dict(address=out_addr,
+                             value=wt.outputs[o].value,
+                             acct=acct,
+                             addr_type=addr_type))
+                    include = True
+                    values["internal_outputs"] += wt.outputs[o].value
+                else:
+                    if len(txid_dict['spends']):
+                        txid_dict['deposits'].append(
+                            dict(address=out_addr,
+                                 value=wt.outputs[o].value,
+                                 acct=None,
+                                 addr_type='external'))
+
+        rv = None
+        if include:
+            rv = self._finalize_txn_history_record(txid_dict, values)
+
+        return rv
+
+    def _finalize_txn_history_record(self, record, values):
+        if len(record['spends']):
+            record["fees"] = values['inputs'] - values['outputs']
+            record["external_value"] = values['internal_inputs'] - \
+                                          values['internal_outputs'] - \
+                                          record['fees']
+            if record["external_value"] == 0:
+                record["classification"] = "internal_transfer"
+            else:
+                record["classification"] = "spend"
+        else:
+            record["fees"] = None
+            record["classification"] = "deposit"
+
+        return record
+
+    def transaction_history(self, accounts=[]):
+        """ Returns a list containing all transactions associated with
+            this wallet. Transactions are ordered from oldest to most
+            recent.
+        """
+        # First get address to account/chain mapping
+        accts = self._check_and_get_accounts(accounts)
+
+        acct_addrs = {}
+        for a in accts:
+            for i in [0, 1]:
+                ia = self._cache_manager.get_addresses_for_chain(
+                    acct_index=a.index, chain=i)
+                for addr in ia:
+                    acct_addrs[addr] = (a, i)
+
+        history = []
+        txc = self._cache_manager._txn_cache
+        ordered_txids = sorted(list(txc.keys()),
+                               key=lambda txid: txc[txid].network_time)
+        for txid in ordered_txids:
+            record = self._create_txn_history_record(txid, acct_addrs)
+            if record is not None:
+                history.append(record)
+        return history
+
     @property
     def accounts(self):
         """ All accounts in the wallet.
@@ -1622,10 +1763,12 @@ class Wallet(object):
 
     txn_list_deser = lambda rv: [dict(txid=t['txid'],
                                       txn=WalletTransaction._deserialize(t['txn'])) for t in rv]
+    priv_key_deser = lambda pkey: HDPrivateKey.from_b58check(pkey) if pkey is not None else None
+
     serializers = dict(
         get_private_for_public=dict(
             args=dict(public_key=_public_key_serializer),
-            return_value=HDPrivateKey.from_b58check),
+            return_value=priv_key_deser),
         get_change_public_key=dict(
             args=dict(),
             return_value=HDPublicKey.from_b58check),
@@ -1645,6 +1788,9 @@ class Wallet(object):
             args=dict(),
             return_value=txn_list_deser),
         send_to_multiple=dict(
+            args=dict(),
+            return_value=txn_list_deser),
+        spread_utxos=dict(
             args=dict(),
             return_value=txn_list_deser),
         build_signed_transaction=dict(
