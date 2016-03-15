@@ -1,44 +1,28 @@
-""""BitRequests, or requests with 402 ability.
-
-BitTransfer Protocol:
-
-An instant off chain approach to transfering Bitcoin.
-
-Flow from clients perspective (user 1):
-
-1. user 1 does a 21 mine
-    - user 1 has 100k satohsi in earnings
-2. user 1 does a 21 status
-    - CLI displays earnings (aggregated shares) as their balance
-3. User does a 21 buy endpoint/current-weather from user 2
-    - Here user 1 does a call to user 2's server
-        - user 2 responds with a 402 of their price / and their 21 username
-    if user 1 decides to pay for that endpoint:
-        - user 1 sends to user 2 the message (u1, pay, u2, price) (the transfer)
-          signed with their private key (aka: machine auth)
-            - user 2 sends this to the server
-            - server checks if u1 has enough money to pay u2 (balance table).
-                - if not, check earnings table.
-                    - if earnings table, transfer from earnings -> balance.
-            - server updates u2 & u1's balance to reflect the payment price.
-            - server sends 200 OK to u2, who then sends data to u1 in 200
+"""This module provides various BitRequests methods, including:
+`BitTransferRequests`, `OnChainRequests`, and `ChannelRequests`. These objects
+can be used to make 402-enabled, paid HTTP requests to servers that
+support the 402-protocol and those specific payment methods.
 """
 import time
 import json
-import requests
 import logging
+import requests
 
 logger = logging.getLogger('bitrequests')
 
+
 class BitRequestsError(Exception):
+    """Generic exception for BitRequests modules."""
     pass
 
 
 class UnsupportedPaymentMethodError(BitRequestsError):
+    """Raised when using a payment method that is not supported by a server."""
     pass
 
 
 class ResourcePriceGreaterThanMaxPriceError(BitRequestsError):
+    """Raised when paying for a resource whose price exceeds the client's maximum allowable price."""
     pass
 
 
@@ -101,7 +85,7 @@ class BitRequests(object):
         response = requests.request(method, url, **kwargs)
 
         # Return if we receive a status code other than 402: payment required
-        if (response.status_code != requests.codes.payment_required):
+        if response.status_code != requests.codes.payment_required:
             return response
 
         # Pass the response to the main method for handling payment
@@ -212,7 +196,7 @@ class BitTransferRequests(BitRequests):
     def get_402_info(self, url):
         """Get bit-transfer payment information about the resource."""
         headers = requests.get(url).headers
-        price = headers.get(BitTransferRequests.HTTP_BITCOIN_PRICE)
+        price = headers.get(BitTransferRequests.HTTP_BITCOIN_PRICE, 0)
         payee_address = headers.get(BitTransferRequests.HTTP_BITCOIN_ADDRESS)
         payee_username = headers.get(BitTransferRequests.HTTP_BITCOIN_USERNAME)
         return {BitTransferRequests.HTTP_BITCOIN_PRICE: int(price),
@@ -274,32 +258,32 @@ class OnChainRequests(BitRequests):
 
 
 class ChannelRequests(BitRequests):
-
     """BitRequests for making channel payments."""
 
+    import two1.lib.channels as channels
+
     HTTP_BITCOIN_PRICE = 'price'
-    HTTP_BITCOIN_MICROPAYMENT_SERVER = 'bitcoin-micropayment-server'
-    HTTP_BITCOIN_MICROPAYMENT_TOKEN = 'bitcoin-micropayment-token'
+    HTTP_BITCOIN_PAYMENT_CHANNEL_SERVER = 'bitcoin-payment-channel-server'
+    HTTP_BITCOIN_PAYMENT_CHANNEL_TOKEN = 'bitcoin-payment-channel-token'
 
     DEFAULT_DEPOSIT_AMOUNT = 100000
     DEFAULT_DURATION = 86400
-    DEFAULT_CLOSE_AMOUNT = 1000
+    DEFAULT_ZEROCONF = True
+    DEFAULT_USE_UNCONFIRMED = False
 
-    def __init__(self, wallet, deposit_amount=DEFAULT_DEPOSIT_AMOUNT, duration=DEFAULT_DURATION, close_amount=DEFAULT_CLOSE_AMOUNT):
+    def __init__(self, wallet, deposit_amount=DEFAULT_DEPOSIT_AMOUNT, duration=DEFAULT_DURATION):
         """Initialize the channel requests with a payment channel client."""
         super().__init__()
-        from two1.lib.channels import PaymentChannelClient
-        self._channelclient = PaymentChannelClient(wallet)
+        self._channelclient = ChannelRequests.channels.PaymentChannelClient(wallet)
         self._deposit_amount = deposit_amount
         self._duration = duration
-        self._close_amount = close_amount
 
     def make_402_payment(self, response, max_price):
         """Make a channel payment."""
 
         # Retrieve payment headers
         price = response.headers.get(ChannelRequests.HTTP_BITCOIN_PRICE)
-        server_url = response.headers.get(ChannelRequests.HTTP_BITCOIN_MICROPAYMENT_SERVER)
+        server_url = response.headers.get(ChannelRequests.HTTP_BITCOIN_PAYMENT_CHANNEL_SERVER)
 
         # Verify that the payment method is supported
         if price is None or server_url is None:
@@ -329,7 +313,7 @@ class ChannelRequests(BitRequests):
                 channel_url = None
 
             # Check if the channel balance is sufficient
-            elif status.ready and (status.balance - price) < self._close_amount:
+            elif status.ready and status.balance < price:
                 logger.debug("[ChannelRequests] Channel balance low. Refreshing channel.")
                 self._channelclient.close(channel_url)
                 status = self._channelclient.status(channel_url)
@@ -338,21 +322,26 @@ class ChannelRequests(BitRequests):
 
         # Open a new channel if we don't have a usable one
         if not channel_url or not status.ready:
-            logger.debug("[ChannelRequests] Opening channel at {} with deposit {}.".format(channel_url, self._deposit_amount))
-            channel_url = self._channelclient.open(server_url, self._deposit_amount, self._duration, zeroconf=True, use_unconfirmed=True)
+            logger.debug("[ChannelRequests] Opening channel at {} with deposit {}.".format(server_url, self._deposit_amount))
+            channel_url = self._channelclient.open(server_url, self._deposit_amount, self._duration, zeroconf=ChannelRequests.DEFAULT_ZEROCONF, use_unconfirmed=ChannelRequests.DEFAULT_USE_UNCONFIRMED)
             status = self._channelclient.status(channel_url)
             logger.debug("[ChannelRequests] Channel deposit txid is {}".format(status.deposit_txid))
 
         # Pay through the channel
         logger.debug("[ChannelRequests] Paying channel {} with amount {}.".format(channel_url, price))
-        token = self._channelclient.pay(channel_url, price)
+        try:
+            token = self._channelclient.pay(channel_url, price)
+        except ChannelRequests.channels.ClosedError:
+            # If the server closed the channel, restart payment process to
+            # negotiate a new channel.
+            return self.make_402_payment(response, max_price)
 
-        return {ChannelRequests.HTTP_BITCOIN_MICROPAYMENT_TOKEN: token}
+        return {ChannelRequests.HTTP_BITCOIN_PAYMENT_CHANNEL_TOKEN: token}
 
     def get_402_info(self, url):
         """Get channel payment information about the resource."""
         response = requests.get(url)
         price = response.headers.get(ChannelRequests.HTTP_BITCOIN_PRICE)
-        channel_url = response.headers.get(ChannelRequests.HTTP_BITCOIN_MICROPAYMENT_SERVER)
+        channel_url = response.headers.get(ChannelRequests.HTTP_BITCOIN_PAYMENT_CHANNEL_SERVER)
         return {ChannelRequests.HTTP_BITCOIN_PRICE: price,
-                ChannelRequests.HTTP_BITCOIN_MICROPAYMENT_SERVER: channel_url}
+                ChannelRequests.HTTP_BITCOIN_PAYMENT_CHANNEL_SERVER: channel_url}

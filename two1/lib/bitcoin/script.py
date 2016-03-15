@@ -1,11 +1,16 @@
+"""This submodule provides a single Script class that has knowledge of all
+Bitcoin opcodes. At the simplest level, it can read in the raw bytes of a
+Bitcoin script, parse it, and determine what type of script it is (P2PKH, P2SH,
+multi-sig, etc). It also provides capabilities for building more complex
+scripts programmatically."""
 import base58
-import hashlib
+import copy
 import re
 import struct
 
 from two1.lib.bitcoin.crypto import PublicKey
 from two1.lib.bitcoin.crypto import Signature
-from two1.lib.bitcoin.exceptions import ParsingError
+from two1.lib.bitcoin.exceptions import ScriptParsingError
 from two1.lib.bitcoin.utils import bytes_to_str
 from two1.lib.bitcoin.utils import hash160
 from two1.lib.bitcoin.utils import key_hash_to_address
@@ -16,12 +21,12 @@ from two1.lib.bitcoin.utils import render_int
 
 class Script(object):
     """ Handles all Bitcoin script-related needs.
-        Currently this means: parsing text scripts,
-        assembling/disassembling and serialization/deserialization.
+    Currently this means: parsing text scripts,
+    assembling/disassembling and serialization/deserialization.
 
-        If a raw byte stream is passed in, disassembly and parsing are
-        deferred until required. If parsing is immediately required,
-        call Script.parse() after constructing the object.
+    If a raw byte stream is passed in, disassembly and parsing are
+    deferred until required. If parsing is immediately required,
+    call Script.parse() after constructing the object.
 
     Args:
         script (bytes or str): Either a text or byte string containing
@@ -56,7 +61,12 @@ class Script(object):
         'OP_RIPEMD160':             0xa6, 'OP_SHA1':                  0xa7, 'OP_SHA256':                0xa8,
         'OP_HASH160':               0xa9, 'OP_HASH256':               0xaa, 'OP_CODESEPARATOR':         0xab,
         'OP_CHECKSIG':              0xac, 'OP_CHECKSIGVERIFY':        0xad, 'OP_CHECKMULTISIG':         0xae,
-        'OP_CHECKMULTISIGVERIFY':   0xaf, }
+        'OP_CHECKMULTISIGVERIFY':   0xaf, 'OP_CHECKLOCKTIMEVERIFY':   0xb1,
+        'OP_CAT':                   0x7e, 'OP_SUBSTR':                0x7f, 'OP_LEFT':                  0x80,
+        'OP_RIGHT':                 0x81, 'OP_INVERT':                0x83, 'OP_AND':                   0x84,
+        'OP_OR':                    0x85, 'OP_XOR':                   0x86, 'OP_2MUL':                  0x8d,
+        'OP_2DIV':                  0x8e, 'OP_MUL':                   0x95, 'OP_DIV':                   0x96,
+        'OP_MOD':                   0x97, 'OP_LSHIFT':                0x98, 'OP_RSHIFT':                0x99}
 
     BTC_OPCODE_REV_TABLE = {v: k for k, v in BTC_OPCODE_TABLE.items()}
     _ser_dispatch_table = None
@@ -66,114 +76,41 @@ class Script(object):
     P2PKH_TESTNET_VERSION = 0x6F
     P2PKH_MAINNET_VERSION = 0x00
 
-    @classmethod
-    def _walk_ast(cls, ast, dispatch_table, default_handler=None, data=None):
-        for a in ast:
-            opcode = None
-            args = None
-            if type(a) is list:
-                opcode = a[0]
-                args = a[1:]
-            else:
-                opcode = a
-
-            handler = dispatch_table.get(opcode, default_handler)
-            if handler is not None:
-                data = handler(opcode, args, data)
-            else:
-                raise ValueError("Opcode %s has no entry in the given dispatch_table!" % opcode)
-
-        return data
-
-    @classmethod
-    def _serialize_pushdata(cls, opcode, args, bytestr):
-        pushlen = int(opcode[-1])
-
-        if len(args) < 2:
-            raise ValueError("Not enough arguments for %s" % opcode)
-
-        datalen = int(args[0], 0)
-        pushdata = args[1]
-
-        bytestr += bytes([cls.BTC_OPCODE_TABLE[opcode]])
-
-        if pushlen == 1:
-            bytestr += bytes([datalen])
-        elif pushlen == 2:
-            bytestr += struct.pack("<H", datalen)
-        elif pushlen == 4:
-            bytestr += struct.pack("<I", datalen)
-
-        bytestr += bytes.fromhex(pushdata[2:])
-        return bytestr
-
-    @classmethod
-    def _serialize_var_data(cls, opcode, args, bytestr):
-        data = bytes.fromhex(opcode[2:])
-        if len(data) < 0x01 or len(data) > 0x4b:
-            raise ValueError("Opcode has too much data to push onto stack: \"%s\"" % opcode)
-        bytestr += bytes([len(data)])
-        bytestr += data
-
-        return bytestr
-
-    @classmethod
-    def _serialize_if_else(cls, opcode, args, bytestr):
-        bytestr += bytes([cls.BTC_OPCODE_TABLE[opcode]])
-
-        if len(args) == 0:
-            raise ValueError("Not enough clauses for %s!" % opcode)
-
-        bytestr += cls._walk_ast(args[0],
-                                 cls._ser_dispatch_table,
-                                 cls._serialize_var_data,
-                                 b'')
-
-        if len(args) == 2:
-            bytestr += bytes([cls.BTC_OPCODE_TABLE['OP_ELSE']])
-            bytestr += cls._walk_ast(args[1],
-                                     cls._ser_dispatch_table,
-                                     cls._serialize_var_data,
-                                     b'')
-            bytestr += bytes([cls.BTC_OPCODE_TABLE['OP_ENDIF']])
-
-        return bytestr
-
-    @classmethod
-    def _serialize_default_opcode(cls, opcode, args, bytestr):
-        bytestr += bytes([cls.BTC_OPCODE_TABLE[opcode]])
-
-        return bytestr
-
-    @classmethod
-    def _build_serializer_dispatch_table(cls):
-        table = {}
-        for k, v in cls.BTC_OPCODE_TABLE.items():
-            if k in ['OP_PUSHDATA1', 'OP_PUSHDATA2', 'OP_PUSHDATA4']:
-                table[k] = cls._serialize_pushdata
-            elif k in ['OP_IF', 'OP_NOTIF']:
-                table[k] = cls._serialize_if_else
-            else:
-                table[k] = cls._serialize_default_opcode
-
-        cls._ser_dispatch_table = table
-
     @staticmethod
     def from_bytes(b):
         """ Deserializes a byte stream containing a script into a Script object.
-            Assumes the first part contains the length of the script in bytes.
+        Assumes the first part contains the length of the script in bytes.
 
         Args:
             b (bytes): A byte-stream containing the script, with the length
-                       of the script in bytes prepended.
+              of the script in bytes prepended.
 
         Returns:
             (scr, b) (tuple): A tuple with the deserialized Script object and
-                              the remainder of the byte stream.
+            the remainder of the byte stream.
         """
         raw_script, b = unpack_var_str(b)
 
         return (Script(raw_script), b)
+
+    @staticmethod
+    def from_hex(h, size_prepended=False):
+        """ Deserializes a hex-encoded string into a Script.
+
+        Args:
+            h (str): hex-encoded string, starting with the length of
+                the script as a compact int.
+            size_prepended (bool): Should be True if the size of the
+                script has already been prepended.
+
+        Returns:
+            Script: A Script object.
+        """
+        b = bytes.fromhex(h)
+        if not size_prepended:
+            b = pack_var_str(b)
+        s, _ = Script.from_bytes(b)
+        return s
 
     @staticmethod
     def build_p2pkh(hash160_key):
@@ -181,14 +118,17 @@ class Script(object):
 
         Args:
             hash160_key (bytes): the RIPEMD-160 hash of the public key
-                in internal byte order.
+              in internal byte order.
 
         Returns:
             scr (Script): a serializable Script object containing the
-                p2pkh script.
+            p2pkh script.
         """
-        return Script('OP_DUP OP_HASH160 0x%s OP_EQUALVERIFY OP_CHECKSIG' %
-                      bytes_to_str(hash160_key))
+        return Script(['OP_DUP',
+                       'OP_HASH160',
+                       hash160_key,
+                       'OP_EQUALVERIFY',
+                       'OP_CHECKSIG'])
 
     @staticmethod
     def build_p2sh(hash160_key):
@@ -196,19 +136,19 @@ class Script(object):
 
         Args:
             hash160_key (bytes): the RIPEMD-160 hash of the script in
-                internal byte order.
+              internal byte order.
 
         Returns:
             scr (Script): a serializable Script object containing the
-                p2sh script.
+            p2sh script.
         """
 
-        return Script('OP_HASH160 0x%s OP_EQUAL' % bytes_to_str(hash160_key))
+        return Script(['OP_HASH160', hash160_key, 'OP_EQUAL'])
 
     @staticmethod
     def build_multisig_redeem(m, pub_keys):
         """ Builds a multisig redeem script and corresponding
-            Pay-to-Script-Hash script.
+        Pay-to-Script-Hash script.
 
         Args:
             m (int): Number of signatures required. Must be <= len(pub_keys).
@@ -221,24 +161,24 @@ class Script(object):
         if m < 1 or m > len(pub_keys):
             raise ValueError("m must be > 0 and <= len(pub_keys)!")
 
-        raw_redeem_script = bytes([0x50 + m])
+        redeem_script = Script("OP_%d" % m)
         for p in pub_keys:
-            raw_redeem_script += bytes([len(p)]) + p
+            redeem_script.append(p)
 
-        raw_redeem_script += bytes([0x50 + len(pub_keys)])
-        raw_redeem_script += bytes([Script.BTC_OPCODE_TABLE['OP_CHECKMULTISIG']])
+        redeem_script.append("OP_%d" % len(pub_keys))
+        redeem_script.append('OP_CHECKMULTISIG')
 
-        return Script(raw_redeem_script)
+        return redeem_script
 
     @staticmethod
     def build_multisig_sig(sigs, redeem_script):
         """ Builds a multisig signature script.
 
-            This script contains the signatures in order given
-            in sigs as well as the redeem script. It is not required
-            to have all required signatures in sigs. However, len(sigs)
-            may not be more than the max number indicated by the redeem
-            script.
+        This script contains the signatures in order given
+        in sigs as well as the redeem script. It is not required
+        to have all required signatures in sigs. However, len(sigs)
+        may not be more than the max number indicated by the redeem
+        script.
 
         Args:
             sigs (list(bytes)): A list of signatures (in DER encoding). The
@@ -259,102 +199,188 @@ class Script(object):
                              multisig_params['n'])
 
         # To correct for the early bitcoin-core off-by-1 error.
-        scr = bytes([0x00])
+        scr = Script('OP_0')
 
         for s in sigs:
-            scr += pack_var_str(s)
+            scr.append(s)
 
-        scr += Script.build_push_str(bytes(redeem_script))
+        scr.append(bytes(redeem_script))
 
-        return Script(scr)
-
-    @staticmethod
-    def build_push_str(s):
-        """ Creates a script to push s onto the stack.
-
-        Args:
-            s (bytes): bytes to be pushed onto the stack.
-
-        Returns:
-            b (bytes): Serialized bytes containing the appropriate PUSHDATA
-                       op for s.
-        """
-        ls = len(s)
-        hexstr = bytes_to_str(s)
-        pd_index = 0
-
-        if ls < Script.BTC_OPCODE_TABLE['OP_PUSHDATA1']:
-            return bytes([ls]) + s
-        # Determine how many bytes are required for the length
-        elif ls < 0xff:
-            pd_index = 1
-        elif ls < 0xffff:
-            pd_index = 2
-        else:
-            pd_index = 4
-
-        p = bytes([Script.BTC_OPCODE_TABLE['OP_PUSHDATA%d' % (pd_index)]])
-        p += bytes([ls]) + s
-        return p
+        return scr
 
     @staticmethod
     def build_push_int(i):
         """ Creates a script to push i onto the stack using the least possible
-            number of bytes.
+        number of bytes.
 
         Args:
             i (int): integer to be pushed onto the stack.
 
         Returns:
             b (bytes): Serialized bytes containing the appropriate PUSHDATA
-                       op for i.
+            op for i.
         """
 
         if i >= 0 and i <= 16:
             return bytes(Script('OP_%d' % i))
         else:
-            return Script.build_push_str(render_int(i))
+            return bytes(Script([render_int(i)]))
+
+    @staticmethod
+    def validate_template(script, template):
+        """ Validates a script against a template.
+
+        Args:
+            script (Script): A Script object.
+            template (list): A list of OPs or types against which to
+                validate script.
+
+        Returns:
+            bool: True if script has the same OPs and types as template,
+                False otherwise.
+        """
+        if len(script) != len(template):
+            return False
+
+        for i, e in enumerate(template):
+            if isinstance(e, str):
+                if script[i] != e:
+                    return False
+            elif isinstance(e, type):
+                if type(script[i]) != e:
+                    return False
+
+        return True
 
     def __init__(self, script=""):
-        if Script._ser_dispatch_table is None:
-            Script._build_serializer_dispatch_table()
-        if isinstance(script, bytes):
-            raw = True
-        elif isinstance(script, str):
-            raw = False
-        else:
-            raise TypeError("Script must either be of type 'bytes' or 'str', not %r." % (type(script)))
-
-        self.script = None
-        self.raw_script = None
         self._ast = []
+        self._tokens = []
+        self._raw_script = None
 
-        if raw:
-            self.raw_script = script
-        else:
-            self.script = script
+        if isinstance(script, bytes):
+            self._raw_script = script
+        elif isinstance(script, str):
+            self._tokenize(script)
             self._parse()
+        elif isinstance(script, list):
+            self._tokens = script
+            self._validate_tokens()
+            self._parse()
+        else:
+            raise TypeError(
+                "script must be of type 'bytes', 'str' or 'list', not %r." %
+                (type(script)))
+
+    def _check_valid_opcode(self, opcode):
+        rv = True
+        if isinstance(opcode, str):
+            # Make sure it's a valid opcode
+            if not opcode in self.BTC_OPCODE_TABLE and \
+               not opcode.startswith("0x") or \
+               opcode in ['OP_PUSHDATA1', 'OP_PUSHDATA2', 'OP_PUSHDATA3']:
+                rv = False
+
+        return rv
+
+    def _check_tokenized(self):
+        if not self._tokens:
+            if self._raw_script:
+                self._disassemble()
+                self._parse()
+                self._raw_script = None
+            else:
+                # Empty script, so just set _tokens to empty list
+                self._tokens = []
+
+    def __getitem__(self, key):
+        self._check_tokenized()
+        return self._tokens[key]
+
+    def __setitem__(self, key, value):
+        self._check_tokenized()
+
+        if not isinstance(value, str) and \
+           not isinstance(value, bytes):
+            raise TypeError("value must either be str or bytes.")
+
+        v = value
+        if not self._check_valid_opcode(value):
+            raise ValueError("%s is not a valid opcode" % value)
+        if isinstance(value, str) and value.startswith("0x"):
+            v = bytes.fromhex(value[2:])
+
+        self._tokens[key] = v
+        self._parse()
+
+    def __delitem__(self, key):
+        self._check_tokenized()
+        del self._tokens[key]
+        self._parse()
+
+    def __iter__(self):
+        self._check_tokenized()
+        return iter(self._tokens)
+
+    def __len__(self):
+        self._check_tokenized()
+        return len(self._tokens)
+
+    def insert(self, index, value):
+        """ Inserts an OP before the specified index
+
+        Args:
+            index (int): Index of element to insert before
+            value (str or bytes): OP to insert.
+        """
+        v = value
+        if not self._check_valid_opcode(value):
+            raise ValueError("%s is not a valid opcode" % value)
+        if isinstance(value, str) and value.startswith("0x"):
+            v = bytes.fromhex(value[2:])
+
+        self._check_tokenized()
+
+        self._tokens.insert(index, v)
+        self._parse()
+
+    def append(self, value):
+        """ Append an OP to the end of the script
+
+        Args:
+            value (str or bytes): OP to insert.
+        """
+        v = value
+        if not self._check_valid_opcode(value):
+            raise ValueError("%s is not a valid opcode" % value)
+        if isinstance(value, str) and value.startswith("0x"):
+            v = bytes.fromhex(value[2:])
+
+        self._check_tokenized()
+
+        self._tokens.append(v)
+        self._parse()
 
     @property
     def ast(self):
+        """ Returns the script's abstract syntax tree.
+
+        Returns:
+            list: a nested list of opcodes which follow the flow of a script's
+                conditional if/else branching.
+        """
         if not self._ast:
             self._parse()
 
         return self._ast
 
     def hash160(self):
-        """ Return the RIPEMD-160 hash of the SHA-256 hash of a
-            multisig redeem script.
+        """ Return the RIPEMD-160 hash of the SHA-256 hash of the
+        script.
 
-        Returns
-            bytes: RIPEMD-160 byte string or b"" if this script
-                is not a multisig redeem script.
+        Returns:
+            bytes: RIPEMD-160 byte string.
         """
-        rv = b""
-        if self.is_multisig_redeem():
-            rv = hash160(bytes(self))
-
-        return rv
+        return hash160(bytes(self))
 
     def address(self, testnet=False):
         """ Returns the Base58Check encoded version of the HASH160.
@@ -366,11 +392,9 @@ class Script(object):
         Returns:
             bytes: Base58Check encoded string
         """
-        hash160 = self.hash160()
         rv = ""
-        if hash160:
-            prefix = bytes([self.P2SH_TESTNET_VERSION if testnet else self.P2SH_MAINNET_VERSION])
-            rv = base58.b58encode_check(prefix + hash160)
+        prefix = bytes([self.P2SH_TESTNET_VERSION if testnet else self.P2SH_MAINNET_VERSION])
+        rv = base58.b58encode_check(prefix + self.hash160())
 
         return rv
 
@@ -383,31 +407,29 @@ class Script(object):
                 'signature': The DER-encoded signature
                 'public_key': The bytes corresponding the public key.
         """
-        if len(self.ast) != 2:
+        if len(self) != 2:
             raise TypeError("Script is not a P2PKH signature script")
 
+        if not isinstance(self[0], bytes) or \
+           not isinstance(self[1], bytes):
+            raise TypeError(
+                "Signature script must contain two push operations.")
+
         try:
-            sig_hex = self.ast[0]
-            if sig_hex.startswith("0x"):
-                sig_hex = sig_hex[2:]
-            sig_bytes = bytes.fromhex(sig_hex)
+            sig_bytes = self[0]
             hash_type = sig_bytes[-1]
-            sig = Signature.from_der(sig_bytes[:-1])
-        except ValueError as e:
+            _ = Signature.from_der(sig_bytes[:-1])
+        except ValueError:
             raise TypeError("Signature does not appear to be valid")
 
         try:
-            pub_key_hex = self.ast[1]
-            if pub_key_hex.startswith("0x"):
-                pub_key_hex = pub_key_hex[2:]
-            pub_key_bytes = bytes.fromhex(pub_key_hex)
-            pub_key = PublicKey.from_bytes(pub_key_bytes)
+            _ = PublicKey.from_bytes(self[1])
         except ValueError:
             raise TypeError("Public key does not appear to be valid")
 
         return dict(hash_type=hash_type,
                     signature=sig_bytes,
-                    public_key=pub_key_bytes)
+                    public_key=self[1])
 
     def extract_multisig_redeem_info(self):
         """ Returns information about the multisig redeem script
@@ -416,8 +438,7 @@ class Script(object):
             dict: Contains the following list of keys:
                'm' (int): Required number of signatures.
                'n' (int): Maximum number of signatures.
-               'public_keys' (list): List of byte strings
-                   corresponding to public keys.
+               'public_keys' (list): List of byte strings corresponding to public keys.
         """
         exc = TypeError("This script is not a multisig redeem script.")
 
@@ -462,36 +483,25 @@ class Script(object):
 
         Returns:
             dict: With the following key/value pairs:
-                'signatures' (list): List of DER-encoded signatures with
-                    hash_type appended at the end of the byte string.
+                'signatures' (list): List of DER-encoded signatures with hash_type appended at the end of the byte string.
                 'redeem_script' (Script): The associated redeem script.
         """
-        ast = self.ast
-
         # A signature script should start with OP_0
-        if ast[0] != 'OP_0':
+        if self[0] != 'OP_0':
             raise TypeError("Script does not start with OP_0!")
 
         # Everything after OP_0 and before the last operand is a signature.
         # If it does not start with '0x', something is wrong.
         sigs = []
-        for i, x in enumerate(ast[1:-1]):
-            if isinstance(x, str) and x.startswith('0x'):
-                sigs.append(bytes.fromhex(x[2:]))
+        for i, x in enumerate(self[1:-1]):
+            if isinstance(x, bytes):
+                sigs.append(x)
             else:
                 raise TypeError(
                     "Operand %d does not seem to be a signature!" % i)
 
         # The last operand should be the redeem script
-        r = ast[-1]
-        if isinstance(r, list):
-            if not r[0].startswith('OP_PUSHDATA'):
-                raise TypeError(
-                    "Expecting an OP_PUSHDATA but got %s" % r[0])
-            script_bytes = bytes.fromhex(r[-1][2:])  # Skip the 0x
-        else:
-            script_bytes = bytes.fromhex(r[2:])  # Skip the 0x
-        redeem_script = Script(script_bytes)
+        redeem_script = Script(self[-1])
 
         if not redeem_script.is_multisig_redeem():
             raise TypeError("Invalid or no redeem script found!")
@@ -500,7 +510,7 @@ class Script(object):
 
     def is_p2pkh(self):
         """ Returns whether this script is a common Pay-to-Public-Key-Hash
-            script.
+        script.
 
         Returns:
             bool: True if it is a common P2PKH script, False otherwise.
@@ -513,7 +523,7 @@ class Script(object):
 
     def is_p2sh(self):
         """ Returns whether this script is a Pay-to-Script-Hash
-            script.
+        script.
 
         Returns:
             bool: True if it is a P2SH script, False otherwise.
@@ -526,7 +536,7 @@ class Script(object):
 
     def is_p2pkh_sig(self):
         """ Returns whether this script a Pay-to-Public-Key-Hash
-            signature script.
+        signature script.
 
         Returns:
             bool: True if it is a P2PKH signature script, False otherwise.
@@ -563,34 +573,36 @@ class Script(object):
 
     def get_hash160(self):
         """ Scans the script for OP_HASH160 and returns the data
-            immediately following it.
+        immediately following it.
 
         Returns:
-            d (str or None): the hash160 (hex-encoded) or None.
+            bytes: the hash160 or None.
         """
-        if not self._ast:
-            self._parse()
+        self._check_tokenized()
+        if not self._tokens:
+            raise ScriptParsingError(
+                "Script is empty or has not been disassembled")
 
         # Scan for OP_HASH160
-        for i, opcode in enumerate(self._ast):
+        for i, opcode in enumerate(self):
             if opcode == "OP_HASH160":
-                return self._ast[i+1]
+                return self[i+1]
 
         return None
 
     def get_addresses(self, testnet=False):
         """ Returns all addresses found in this script
 
-            For output scripts, P2PKH scripts will return a single
-            address the funds are being sent to. P2SH scripts will
-            return a single address of the script the funds are being
-            sent to.
+        For output scripts, P2PKH scripts will return a single
+        address the funds are being sent to. P2SH scripts will
+        return a single address of the script the funds are being
+        sent to.
 
-            For input scripts, only standard signature and
-            multi-signature scripts will return results: the
-            address(es) used to sign. For standard signature scripts,
-            a single address is returned while for multi-sig scripts,
-            all n addresses in the redeem script are returned.
+        For input scripts, only standard signature and
+        multi-signature scripts will return results: the
+        address(es) used to sign. For standard signature scripts,
+        a single address is returned while for multi-sig scripts,
+        all n addresses in the redeem script are returned.
 
         Args:
             testnet (bool): True if the addresses are being used on testnet,
@@ -623,6 +635,9 @@ class Script(object):
             sig_info = self.extract_sig_info()
             rv.append(key_hash_to_address(hash160(sig_info['public_key']),
                                           version))
+        elif Script.validate_template(self, [bytes, 'OP_CHECKSIG']):
+            version = self.P2PKH_TESTNET_VERSION if testnet else self.P2PKH_MAINNET_VERSION
+            rv.append(key_hash_to_address(hash160(self[0]), version))
 
         return rv
 
@@ -632,10 +647,29 @@ class Script(object):
         Returns:
             scr (Script): New script object devoid of any OP_<op>.
         """
+        self._check_tokenized()
         if op not in self.BTC_OPCODE_TABLE:
             raise ValueError("Unknown op (%s)" % (op))
 
-        return Script(" ".join([t for t in str(self).split() if t != op]))
+        return Script([t for t in self._tokens if t != op])
+
+    def _validate_tokens(self):
+        """ Checks that there are no push OPs in the tokens as they
+            should all just be bytes.
+        """
+        self._check_tokenized()
+        for t in self._tokens:
+            if t in ['OP_PUSHDATA1', 'OP_PUSHDATA2', 'OP_PUSHDATA3']:
+                raise TypeError(
+                    "No push ops allowed, simply add the bytes to be pushed.")
+
+    def _tokenize(self, s):
+        """ Breaks up a string into tokens and converts all tokens
+            starting with "0x" into bytes
+        """
+        self._tokens = [bytes.fromhex(t[2:]) if t.startswith("0x") else t
+                        for t in s.split()]
+        self._validate_tokens()
 
     def _parse(self):
         """ This is a basic Recursive Descent Parser for the Bitcoin
@@ -643,52 +677,66 @@ class Script(object):
             interpretation of that script. The resultant tokens are stored
             in ``self._ast``.
         """
-        if self.script is None and self.raw_script is not None:
-            self._disassemble(self.raw_script)
-
-        self._ast = []
-        self.tokens = self.script.split()
-
-        self._ast = self._do_parse()
+        self._check_tokenized()
+        if self._tokens:
+            self._temp_tokens = copy.deepcopy(self._tokens)
+            self._ast = self._do_parse()
 
     def _do_parse(self, in_if_else=False):
         if_clause = None
         else_clause = None
         ast = []
-        while self.tokens:
-            opcode = self.tokens.pop(0)
+        while self._temp_tokens:
+            opcode = self._temp_tokens.pop(0)
             if opcode in ['OP_0', 'OP_FALSE']:
                 ast.append(opcode)
-            elif opcode.startswith("0x"):
-                data = bytes.fromhex(opcode[2:])
-                if len(data) < 0x01 or len(data) > 0x4b:
-                    raise ValueError("Opcode has too much data to push onto stack: \"%s\"" % opcode)
-                ast.append(opcode)
+            elif isinstance(opcode, bytes):
+                l = len(opcode)
+                if l <= 0x4b:
+                    ast.append(opcode)
+                elif l <= 0xff:
+                    ast.append(['OP_PUSHDATA1', bytes([l]), opcode])
+                elif l <= 0xffff:
+                    ast.append(['OP_PUSHDATA2', struct.pack("<H", l), opcode])
+                elif l <= 0xffffffff:
+                    ast.append(['OP_PUSHDATA4', struct.pack("<I", l), opcode])
             elif opcode in ['OP_PUSHDATA1', 'OP_PUSHDATA2', 'OP_PUSHDATA4']:
-                # Easy enough that we don't need to recurse here
-                datalen = self.tokens.pop(0)
-                data = self.tokens.pop(0)
-                ast.append([opcode, datalen, data])
+                raise TypeError(
+                    "No push ops allowed, simply add the bytes to be pushed.")
             elif opcode in ['OP_IF', 'OP_NOTIF']:
+                got_endif = False
                 # Recursively descend
                 if_clause = self._do_parse(True)
+                if if_clause[-1] == 'OP_ENDIF':
+                    got_endif = True
+                    if_clause.pop()
 
                 token = [opcode, if_clause]
 
                 # Check for an else clause
-                if self.tokens[0] == 'OP_ELSE':
-                    self.tokens.pop(0)
+                if self._temp_tokens and \
+                   self._temp_tokens[0] == 'OP_ELSE':
+                    self._temp_tokens.pop(0)
                     else_clause = self._do_parse(True)
+                    if else_clause[-1] == 'OP_ENDIF':
+                        got_endif = True
+                        else_clause.pop()
                     token.append(else_clause)
 
+                if got_endif:
+                    token.append('OP_ENDIF')
+                else:
+                    raise ScriptParsingError("No matching OP_ENDIF")
                 ast.append(token)
             elif opcode in ['OP_ELSE', 'OP_ENDIF']:
-                if in_if_else is None:
-                    raise ParsingError("Illegal %s when not in if/else." %
-                                       opcode)
+                if not in_if_else:
+                    raise ScriptParsingError("Illegal %s when not in if/else." %
+                                             opcode)
 
                 if opcode == 'OP_ELSE':
-                    self.tokens = [opcode] + self.tokens
+                    self._temp_tokens = [opcode] + self._temp_tokens
+                else:
+                    ast.append(opcode)
 
                 break
             else:
@@ -697,22 +745,23 @@ class Script(object):
 
         return ast
 
-    def _disassemble(self, raw):
+    def _disassemble(self):
         """ Disassembles a raw script (in bytes) to human-readable text
             using the opcodes in BTC_OPCODE_TABLE. The disassembled string
-            is stored in self.script.
-
-        Args:
-            raw (bytes): A byte stream containing the script to be
-                disassembled.
+            is stored in self._tokens.
         """
-        script = []
+        if self._raw_script is None:
+            return
+
+        raw = self._raw_script
+
+        self._tokens = []
         while raw:
             op, raw = raw[0], raw[1:]
             if op == 0x00:
-                script.append('OP_0')
+                self._tokens.append('OP_0')
             elif op < 0x4b:
-                script.append('0x%s' % (bytes_to_str(raw[0:op])))
+                self._tokens.append(raw[0:op])
                 raw = raw[op:]
             else:
                 opcode = Script.BTC_OPCODE_REV_TABLE[op]
@@ -720,21 +769,19 @@ class Script(object):
                     pushlen = int(opcode[-1])
                     datalen = 0
                     if pushlen == 1:
-                        datalen, raw = raw[0], raw[1:]
+                        datalen = raw[0]
+                        datalen_bytes, raw = bytes([raw[0]]), raw[1:]
                     elif pushlen == 2:
-                        datalen, raw = struct.unpack("<H", raw[0:2])[0], raw[2:]
+                        datalen_bytes, raw = raw[0:2], raw[2:]
+                        datalen = struct.unpack("<H", datalen_bytes)[0]
                     elif pushlen == 4:
-                        datalen, raw = struct.unpack("<I", raw[0:4])[0], raw[4:]
+                        datalen_bytes, raw = raw[0:4], raw[4:]
+                        datalen = struct.unpack("<I", datalen_bytes)[0]
 
-                    script.append('OP_PUSHDATA%d 0x%x 0x%s' %
-                                  (pushlen,
-                                   datalen,
-                                   bytes_to_str(raw[:datalen])))
+                    self._tokens.append(raw[:datalen])
                     raw = raw[datalen:]
                 else:
-                    script.append(opcode)
-
-        self.script = " ".join(script)
+                    self._tokens.append(opcode)
 
     def __str__(self):
         """ Creates a human-readable string representation of the script.
@@ -742,27 +789,68 @@ class Script(object):
         Returns:
             s (str): String representation of the script
         """
-        if self.script is None:
-            # Hasn't been disassambled yet...
-            self._disassemble(self.raw_script)
+        script = ""
+        self._check_tokenized()
+        for t in self._tokens:
+            if isinstance(t, bytes):
+                script += "0x%s " % bytes_to_str(t)
+            else:
+                script += t + " "
 
-        return self.script
+        return script.rstrip()
 
     def __bytes__(self):
         """ Serializes the object into a byte stream.
-            It does *not* prepend the length of the script to the returned
-            bytes. To do so, call two1.bitcoin.utils.pack_var_str() passing
-            in the returned bytes.
+        It does *not* prepend the length of the script to the returned
+        bytes. To do so, call two1.bitcoin.utils.pack_var_str() passing
+        in the returned bytes.
 
         Returns:
             b (bytes): a serialized byte stream of this Script object.
         """
-        if self.raw_script is None:
-            if len(self._ast) == 0:
-                self._parse()
-            self.raw_script = Script._walk_ast(self._ast,
-                                               Script._ser_dispatch_table,
-                                               Script._serialize_var_data,
-                                               b'')
+        b = b''
+        i = 0
+        if self._raw_script is not None:
+            return self._raw_script
 
-        return self.raw_script
+        while i < len(self):
+            t = self[i]
+            if isinstance(t, bytes):
+                l = len(t)
+                if l < 0x01:
+                    raise ValueError(
+                        "Empty byte string not allowed.")
+                elif l <= 0x4b:
+                    b += bytes([l])
+                    b += t
+                else:
+                    if l <= 0xff:
+                        op = 'OP_PUSHDATA1'
+                        pushlen = bytes([l])
+                    elif l <= 0xffff:
+                        op = 'OP_PUSHDATA2'
+                        pushlen = struct.pack("<H", l)
+                    elif l <= 0xffffffff:
+                        op = 'OP_PUSHDATA4'
+                        pushlen = struct.pack("<I", l)
+                    else:
+                        raise ValueError(
+                            "op has too much data to push onto stack.")
+
+                    b += bytes([self.BTC_OPCODE_TABLE[op]])
+                    b += pushlen
+                    b += t
+            else:
+                b += bytes([self.BTC_OPCODE_TABLE[t]])
+
+            i += 1
+
+        return b
+
+    def to_hex(self):
+        """ Generates a hex encoding of the serialized script.
+
+        Returns:
+            str: Hex-encoded serialization.
+        """
+        return bytes_to_str(bytes(self))

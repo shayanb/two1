@@ -1,3 +1,4 @@
+import functools
 import logging
 import logging.handlers
 import signal
@@ -12,6 +13,7 @@ from jsonrpcserver.exceptions import ServerError
 from path import Path
 from two1.lib.bitcoin.crypto import PublicKey
 from two1.lib.bitcoin.crypto import HDPublicKey
+from two1.lib.wallet import daemonizable
 from two1.lib.wallet.socket_rpc_server import UnixSocketJSONRPCServer
 from two1.lib.wallet.exceptions import AccountCreationError
 from two1.lib.wallet.exceptions import DaemonRunningError
@@ -19,6 +21,7 @@ from two1.lib.wallet.exceptions import WalletBalanceError
 from two1.lib.wallet.exceptions import WalletLockedError
 from two1.lib.wallet.exceptions import WalletNotLoadedError
 from two1.lib.wallet.two1_wallet import Two1Wallet
+from two1.lib.wallet.two1_wallet import Wallet
 from two1.lib.wallet.cli import validate_data_provider
 from two1.lib.wallet.cli import WALLET_VERSION
 
@@ -94,7 +97,7 @@ def do_update(block_on_acquire=True):
             if wallet_dict_lock.acquire(block_on_acquire):
                 lock_acquired = True
                 logger.debug("Starting wallet update ...")
-                wallet['obj']._sync_accounts()
+                wallet['obj'].sync_accounts()
                 wallet['update_info']['last_update'] = time.time()
                 logger.debug("Completed update.")
 
@@ -184,11 +187,8 @@ def _check_wallet_loaded():
             "Wallet is locked. Use the 'unlock' command with the passphrase as an arg."))
 
 
-def daemon_method(f):
+def local_daemon_method(f):
     """ Decorator function to create a daemon method.
-
-        This function also checks if the wallet is loaded and handles
-        exceptions.
 
     Args:
         f (function): The function to make a daemon method
@@ -197,294 +197,47 @@ def daemon_method(f):
         function: A wrapper function
     """
     def wrapper(params):
-        _check_wallet_loaded()
-        logger.debug("%s(%r, %r)" % (f.__name__,
-                                     params['args'],
-                                     params['kwargs']))
-        try:
-            return f(*params['args'], **params['kwargs'])
-        except Exception as e:
-            _handle_exception(e)
+        return f(*params['args'], **params['kwargs'])
 
     methods.add(wrapper, f.__name__)
 
     return wrapper
 
 
-@daemon_method
-def testnet():
-    """ RPC method to determine whether the wallet is a testnet wallet.
-
-    Returns:
-        bool: True if the wallet is a testnet wallet, False otherwise.
-    """
-    return wallet['obj'].testnet
-
-
-@daemon_method
-def confirmed_balance(account=None):
-    """ RPC method to get the current confirmed balance.
-
-    Returns:
-        int: Current confirmed balance in satoshis.
-    """
-    return wallet['obj'].confirmed_balance(account)
-
-
-@daemon_method
-def unconfirmed_balance(account=None):
-    """ RPC method to get the current unconfirmed balance.
-
-    Returns:
-        int: Current unconfirmed balance in satoshis.
-    """
-    return wallet['obj'].unconfirmed_balance(account)
-
-
-@daemon_method
-def get_private_for_public(public_key):
-    """ RPC method to get the private key for the given public_key, if it is
-        a part of this wallet.
-
-    Args:
-        public_key (str): Base58Check encoded serialization of the public key.
-
-    Returns:
-        str: A Base58Check encoded serialization of the private key object
-           or None.
-    """
-    w = wallet['obj']
+def _call_daemon_method(method_name, is_property, params):
+    _check_wallet_loaded()
+    logger.debug("%s(%r, %r)" % (method_name,
+                                 params['args'],
+                                 params['kwargs']))
     try:
-        pub_key = HDPublicKey.from_b58check(public_key)
-    except ValueError:
-        pub_key = PublicKey.from_base64(public_key)
-    priv_key = w.get_private_key(pub_key.address(testnet=w._testnet))
+        attr = getattr(wallet['obj'], method_name)
+        if is_property:
+            return attr
+        else:
+            args, kwargs = daemonizable.serdes_args(
+                False, Two1Wallet, method_name,
+                *params['args'], **params['kwargs'])
 
-    return priv_key.to_b58check() if priv_key is not None else None
-
-
-@daemon_method
-def current_address():
-    """ RPC method to get the current payout address.
-
-    Returns:
-        str: Base58Check encoded bitcoin address.
-    """
-    return wallet['obj'].current_address
+            return daemonizable.serdes_return_value(
+                True, Two1Wallet, method_name,
+                attr(*args, **kwargs))
+    except Exception as e:
+        _handle_exception(e)
 
 
-@daemon_method
-def get_change_address(account=None):
-    """ RPC method to get the current change address.
+def create_daemon_methods():
+    daemon_methods = daemonizable.get_daemon_methods(Two1Wallet)
+    for method_name, md in daemon_methods.items():
+        p = functools.partial(_call_daemon_method, method_name, False)
+        methods.add(p, method_name)
 
-    Returns:
-        str: Base58Check encoded bitcoin address.
-    """
-    return wallet['obj'].get_change_address(account)
-
-
-@daemon_method
-def get_payout_address(account=None):
-    """ RPC method to get the current payout address.
-
-        This is an alias for current_address but allows
-        passing in an account
-    Returns:
-        str: Base58Check encoded bitcoin address.
-    """
-    return wallet['obj'].get_payout_address(account)
+    daemon_properties = daemonizable.get_daemon_properties(Two1Wallet)
+    for prop in daemon_properties:
+        p = functools.partial(_call_daemon_method, prop, True)
+        methods.add(p, prop)
 
 
-@daemon_method
-def get_change_public_key(account=None):
-    """ RPC method to get the current change public key.
-
-    Returns:
-        str: A Base58Check encoded serialization of the public key
-    """
-    return wallet['obj'].get_change_public_key(account).to_b58check()
-
-
-@daemon_method
-def get_payout_public_key(account=None):
-    """ RPC method to get the current payout public key.
-
-    Returns:
-        str: A Base58Check encoded serialization of the public key
-    """
-    return wallet['obj'].get_payout_public_key(account).to_b58check()
-
-
-@daemon_method
-def sign_message(message,
-                 account_name_or_index=None,
-                 key_index=0):
-    """ RPC method to sign an arbitrary message
-
-    Args:
-        message (bytes or str): Message to be signed.
-        account_name_or_index (str or int): The account to retrieve the
-           change address from. If not provided, the default account (0')
-           is used.
-        key_index (int): The index of the key in the external chain to use.
-
-    Returns:
-        str: A Base64-encoded string containing the signature.
-    """
-    return wallet['obj'].sign_message(message,
-                                      account_name_or_index,
-                                      key_index)
-
-
-@daemon_method
-def sign_bitcoin_message(message, address):
-    """ RPC method to bitcoin sign an arbitrary message
-
-    Args:
-        message (bytes or str): Message to be signed.
-        address (str): Bitcoin address from which the private key will be
-            retrieved and used to sign the message.
-
-    Returns:
-        str: A Base64-encoded string containing the signature with recovery id
-            embedded.
-    """
-    return wallet['obj'].sign_bitcoin_message(message, address)
-
-
-@daemon_method
-def verify_bitcoin_message(message, signature, address):
-    """ RPC method to verify a bitcoin signed message
-
-    Args:
-        message(bytes or str): The message that the signature corresponds to.
-        signature (bytes or str): A Base64 encoded signature
-        address (str): Base58Check encoded address corresponding to the
-           uncompressed key.
-
-    Returns:
-        bool: True if the signature verified properly, False otherwise.
-    """
-    return wallet['obj'].verify_bitcoin_message(message,
-                                                signature,
-                                                address)
-
-
-@daemon_method
-def get_message_signing_public_key(account_name_or_index=None,
-                                   key_index=0):
-    """ RPC method to get the public key used for message signing.
-
-    Args:
-        account_name_or_index (str or int): The account to retrieve the
-            public key from. If not provided, the default account (0')
-            is used.
-        key_index (int): The index of the key in the external chain to use.
-
-    Returns:
-        str: Base64 representation of the public key
-    """
-    pub_key = wallet['obj'].get_message_signing_public_key(account_name_or_index,
-                                                           key_index)
-    return pub_key.to_base64().decode()
-
-
-@daemon_method
-def build_signed_transaction(addresses_and_amounts, use_unconfirmed=False,
-                             insert_into_cache=False, fees=None, accounts=[]):
-    """ RPC method to build and sign a transaction.
-
-    Args:
-        addresses_and_amounts (dict): A dict keyed by recipient address
-           and corresponding values being the amount - *in satoshis* - to
-           send to that address.
-        use_unconfirmed (bool): Use unconfirmed transactions if necessary.
-        insert_into_cache (bool): Insert the transaction into the
-           wallet's cache and mark it as provisional.
-        fees (int): Specify the fee amount manually.
-        accounts (list(str or int)): List of accounts to use. If
-           not provided, all discovered accounts may be used based
-           on the chosen UTXO selection algorithm.
-
-    Returns:
-        list(WalletTransaction): A list of WalletTransaction objects
-    """
-    txns = wallet['obj'].build_signed_transaction(addresses_and_amounts,
-                                                  use_unconfirmed,
-                                                  insert_into_cache,
-                                                  fees,
-                                                  accounts)
-    txns_ser = [t._serialize() for t in txns]
-    logger.debug("txns: %r" % (txns_ser))
-    return txns_ser
-
-
-@daemon_method
-def make_signed_transaction_for(address, amount,
-                                use_unconfirmed=False,
-                                insert_into_cache=False,
-                                fees=None,
-                                accounts=[]):
-    """ Makes a raw signed unbroadcasted transaction for the specified amount.
-
-    Args:
-        address (str): The address to send the Bitcoin to.
-        amount (number): The amount of Bitcoin to send.
-        use_unconfirmed (bool): Use unconfirmed transactions if necessary.
-        insert_into_cache (bool): Insert the transaction into the
-           wallet's cache and mark it as provisional.
-        fees (int): Specify the fee amount manually.
-        accounts (list(str or int)): List of accounts to use. If
-           not provided, all discovered accounts may be used based
-           on the chosen UTXO selection algorithm.
-
-    Returns:
-        list(dict): A list of dicts containing transaction names
-           and raw transactions.  e.g.: [{"txid": txid0, "txn":
-           txn_hex0}, ...]
-    """
-    w = wallet['obj']
-    txns = w.make_signed_transaction_for(address, amount,
-                                         use_unconfirmed,
-                                         insert_into_cache,
-                                         fees,
-                                         accounts)
-    logger.debug("txns: %r" % ([t['txid'] for t in txns]))
-    txns_ser = [dict(txid=t["txid"],
-                     txn=t["txn"]._serialize()) for t in txns]
-
-    return txns_ser
-
-
-@daemon_method
-def send_to(address, amount,
-            use_unconfirmed=False, fees=None,
-            accounts=[]):
-    """ RPC method to send BTC to an address.
-
-    Args:
-        address (str): Base58Check encoded bitcoin address to send coins to.
-        amount (int): Amount in satoshis to send.
-        use_unconfirmed (bool): Use unconfirmed UTXOs if True.
-        fees (int): User-specified fee amount
-        accounts (list): List of accounts to use in sending coins.
-
-    Returns:
-        list: List of txids used to send the coins.
-    """
-    txns = wallet['obj'].send_to(address=address,
-                                 amount=amount,
-                                 use_unconfirmed=use_unconfirmed,
-                                 fees=fees,
-                                 accounts=accounts)
-    logger.debug("txns: %r" % ([t['txid'] for t in txns]))
-    txns_ser = [dict(txid=t["txid"],
-                     txn=t["txn"]._serialize()) for t in txns]
-
-    return txns_ser
-
-
-@methods.add
+@local_daemon_method
 def unlock(passphrase):
     """ RPC method to unlock wallet.
 
@@ -502,7 +255,7 @@ def unlock(passphrase):
     logger.info("... loading complete.")
 
 
-@daemon_method
+@local_daemon_method
 def is_locked():
     """ RPC method to determine whether the wallet is currently locked.
 
@@ -512,7 +265,7 @@ def is_locked():
     return wallet['locked']
 
 
-@daemon_method
+@local_daemon_method
 def wallet_path():
     """ RPC method to return the wallet path of the currently loaded wallet.
 
@@ -522,73 +275,12 @@ def wallet_path():
     return wallet['path']
 
 
-@daemon_method
-def sync_wallet_file():
-    """ RPC method to trigger a write to the wallet file.
+@local_daemon_method
+def sync_accounts():
+    """ RPC method to trigger an update
     """
-    return wallet['obj'].sync_wallet_file()
-
-
-@daemon_method
-def create_account(name):
-    """ RPC method to create an account
-    """
-    return wallet['obj'].create_account(name)
-
-
-@daemon_method
-def account_names():
-    """ RPC method to return all account names
-    """
-    return wallet['obj'].account_names
-
-
-@daemon_method
-def account_map():
-    """ RPC method to return the account map
-    """
-    return wallet['obj'].account_map
-
-
-@daemon_method
-def addresses(accounts):
-    """ RPC method to return all addresses
-    """
-    return wallet['obj'].addresses(accounts)
-
-
-@daemon_method
-def balances_by_address(account):
-    """ RPC method to return balances by address
-    """
-    return wallet['obj'].balances_by_address(account)
-
-
-@daemon_method
-def sweep(address, accounts=[]):
-    """ RPC method to sweep balance to a single address
-    """
-    return wallet['obj'].sweep(address, accounts)
-
-
-@daemon_method
-def spread_utxos(num_addresses, threshold, accounts=[]):
-    """ RPC method to spread utxos to multiple change addresses
-    """
-    txns = wallet['obj'].spread_utxos(num_addresses=num_addresses,
-                                      threshold=threshold,
-                                      accounts=accounts)
-    txns_ser = [dict(txid=t["txid"],
-                     txn=t["txn"]._serialize()) for t in txns]
-
-    return txns_ser
-
-
-@daemon_method
-def transaction_history(accounts=[]):
-    """ RPC method to get dict containing transaction history
-    """
-    return wallet['obj'].transaction_history(accounts)
+    _check_wallet_loaded()
+    do_update()
 
 
 @click.command(context_settings=CONTEXT_SETTINGS)
@@ -599,20 +291,20 @@ def transaction_history(accounts=[]):
               help='Path to wallet file')
 @click.option('--blockchain-data-provider', '-b',
               default='twentyone',
-              type=click.Choice(['twentyone', 'chain']),
+              type=click.Choice(['twentyone', 'insight']),
               show_default=True,
               callback=validate_data_provider,
               help='Blockchain data provider service to use')
-@click.option('--chain-api-key-id', '-ck',
-              metavar='STRING',
-              envvar='CHAIN_API_KEY_ID',
+@click.option('--insight-url', '-iu',
+              metavar='URL',
+              envvar='INSIGHT_URL',
               is_eager=True,
-              help='Chain API Key (only if -b chain)')
-@click.option('--chain-api-key-secret', '-cs',
+              help='Insight Host URL (only if -b insight)')
+@click.option('--insight-api-path', '-ip',
               metavar='STRING',
-              envvar='CHAIN_API_KEY_SECRET',
+              envvar='INSIGHT_API_PATH',
               is_eager=True,
-              help='Chain API Secret (only if -b chain)')
+              help='Insight API path (only if -b insight)')
 @click.option('--data-update-interval', '-u',
               type=click.IntRange(min=10, max=30),
               default=DEF_WALLET_UPDATE_INTERVAL,
@@ -624,8 +316,8 @@ def transaction_history(accounts=[]):
 @click.version_option(WALLET_VERSION)
 @click.pass_context
 def main(ctx, wallet_path, blockchain_data_provider,
-         chain_api_key_id, chain_api_key_secret, data_update_interval,
-         debug):
+         insight_url, insight_api_path,
+         data_update_interval, debug):
     """ Two1 Wallet daemon
     """
     global DEF_WALLET_UPDATE_INTERVAL
@@ -680,6 +372,8 @@ def main(ctx, wallet_path, blockchain_data_provider,
             logger.info("Terminating.")
             sys.exit(-1)
 
+    create_daemon_methods()
+
     # Setup a signal handler
     signal.signal(signal.SIGINT, sig_handler)
     signal.signal(signal.SIGTERM, sig_handler)
@@ -704,10 +398,12 @@ def main(ctx, wallet_path, blockchain_data_provider,
 
 
 try:
-    rpc_server = UnixSocketJSONRPCServer(dispatcher_methods=methods,
-                                         client_lock=client_lock,
-                                         request_cb=track_connections_cb,
-                                         logger=logger)
+    rpc_server = UnixSocketJSONRPCServer(
+        socket_file_name=Wallet.SOCKET_FILE_NAME,
+        dispatcher_methods=methods,
+        client_lock=client_lock,
+        request_cb=track_connections_cb,
+        logger=logger)
 except DaemonRunningError as e:
     click.echo(str(e))
     sys.exit(-1)

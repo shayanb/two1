@@ -1,16 +1,14 @@
-import re
+import urllib
 import base64
 import json
 import click
-from collections import namedtuple
-import urllib.parse
 import datetime
 import requests
-
-from two1.lib.util.exceptions import UpdateRequiredError, BitcoinComputerNeededError
+from simplejson import JSONDecodeError
+from two1.lib.util.exceptions import UpdateRequiredError, BitcoinComputerNeededError, \
+    UnloggedException
 from two1.lib.util.uxstring import UxString
-from two1.commands import config
-from two1.commands.config import TWO1_VERSION
+from two1.commands.config import TWO1_VERSION, TWO1_DEVICE_ID
 
 
 class ServerRequestError(Exception):
@@ -22,7 +20,6 @@ class ServerConnectionError(Exception):
 
 
 class TwentyOneRestClient(object):
-
     def __init__(self, server_url, machine_auth, username=None,
                  version="0"):
         self.auth = machine_auth
@@ -30,7 +27,7 @@ class TwentyOneRestClient(object):
         self.version = version
         self.username = username
         self._session = None
-        self._device_id = config.get_device_uuid() or 'local'
+        self._device_id = TWO1_DEVICE_ID or "local"
         cb = self.auth.public_key.compressed_bytes
         self._wallet_pk = base64.b64encode(cb).decode()
 
@@ -76,10 +73,16 @@ class TwentyOneRestClient(object):
             raise UpdateRequiredError()
 
         if result.status_code == 403:
-            r = result.json()
-            if "detail" in r and "TO100" in r["detail"]:
-                click.secho(UxString.bitcoin_computer_needed, fg="red")
-                raise BitcoinComputerNeededError()
+            try:
+                r = result.json()
+                if "detail" in r and "TO100" in r["detail"]:
+                    click.secho(UxString.bitcoin_computer_needed, fg="red")
+                    raise BitcoinComputerNeededError()
+            # in case the response does not have json raise generic server exception
+            except JSONDecodeError:
+                x = ServerRequestError()
+                x.status_code = result.status_code
+                raise x
 
         if result.status_code > 299:
             x = ServerRequestError()
@@ -98,18 +101,37 @@ class TwentyOneRestClient(object):
         path = "/pool/accounts/"
         return self._request(sign_username=None, method="GET", path=path)
 
+    # PUT /users/{username}
+    def update_password(self, new_password):
+        path = "/users/{}/configs/".format(self.username)
+        encoded_password = base64.encodebytes(bytes(new_password, 'utf-8')).decode()
+        update_body = {"password": encoded_password}
+        data = json.dumps(update_body)
+        ret = self._request(sign_username=self.username, method="PUT", path=path, data=data)
+        return ret
+
     # POST /pool/account
-    def account_post(self, payout_address, email):
+    def account_post(self, payout_address, email, password):
         path = "/pool/account/%s/" % self.username
+        encoded_password = base64.encodebytes(bytes(password, 'utf-8')).decode()
         body = {
             "email": email,
+            "password": encoded_password,
             "payout_address": payout_address,
             "public_key": self._wallet_pk,
             "device_uuid": self._device_id
         }
 
         data = json.dumps(body)
-        ret = self._request(sign_username=self.username, method="POST", path=path, data=data)
+        try:
+            ret = self._request(sign_username=self.username, method="POST", path=path, data=data)
+        except ServerRequestError as e:
+            if e.status_code == 409:
+                username = e.data["username"]
+                click.secho(UxString.existing_account.format(username), fg="red")
+                raise UnloggedException()
+            else:
+                raise e
         return ret
 
     # GET /pool/work/{username}
@@ -129,13 +151,14 @@ class TwentyOneRestClient(object):
             "payout_address": payout_address,
         }
         data = json.dumps(body)
-        return self._request(sign_username=self.username, method="POST", path=path, data=data)
+        return self._request(sign_username=self.username, method="POST", path=path,
+                             data=data)
 
     # GET /pool/statistics/{username}/shares/
     def get_shares(self):
         path = "/pool/statistics/%s/shares/" % self.username
         return (self._request(sign_username=self.username,
-                             path=path).json())[self.username]
+                              path=path).json())[self.username]
 
     # GET /pool/statistics/{username}/earninglogs/
     def get_earning_logs(self):
@@ -156,249 +179,72 @@ class TwentyOneRestClient(object):
         return self._request(sign_username=self.username, method="POST", path=path)
 
     def join(self, network, device_id):
-        data = json.dumps({"network" : network, "zerotier_device_id": device_id})
+        data = json.dumps({"network": network, "zerotier_device_id": device_id})
         path = "/pool/account/%s/zerotier/" % self.username
+        return self._request(sign_username=self.username, method="POST", path=path,
+                             data=data)
+
+    def get_notifications(self, username, detailed=False):
+        path = "/pool/account/%s/notifications/" % self.username
+        if detailed:
+            path += "?detailed=True"
+        return self._request(sign_username=self.username, method="GET", path=path)
+
+    def mark_notifications_read(self, username):
+        path = "/pool/account/%s/notifications/?action=mark_read" % self.username
+        return self._request(sign_username=self.username, method="POST", path=path)
+
+    def publish(self, publish_info):
+        data = json.dumps(publish_info)
+        path = "/market/apps/"
+        return self._request(sign_username=self.username, method="POST", path=path,
+                             data=data)
+
+    def search(self, query=None, page=0):
+        path = "/market/apps/?page={}".format(page)
+        if query:
+            query = urllib.parse.quote(query)
+            path += "&query={}".format(query)
+
+        return self._request(sign_username=self.username, method="GET", path=path)
+
+    def get_listing_info(self, listing_id):
+        path = "/market/apps/{}".format(listing_id)
+        return self._request(sign_username=self.username, method="GET", path=path)
+
+    def get_published_apps(self, username, page=0):
+        path = "/market/users/{}/apps/?page={}".format(self.username, page)
+        return self._request(sign_username=self.username, method="GET", path=path)
+
+    def get_app_full_info(self, username, app_id):
+        path = "/market/users/{}/apps/{}/".format(self.username, app_id)
+        return self._request(sign_username=self.username, method="GET", path=path)
+
+    def delete_app(self, username, app_id):
+        path = "/market/users/{}/apps/{}/".format(self.username, app_id)
+        return self._request(sign_username=self.username, method="DELETE", path=path)
+
+    def rate_app(self, app_id, rating):
+        path = "/market/apps/{}/rating/".format(app_id)
+        data = json.dumps({"rating" : rating})
         return self._request(sign_username=self.username, method="POST", path=path, data=data)
 
-    # GET /mmm/v1/search
-    def mmm_search(self, query, page_num=1, minprice=None, maxprice=None, sort='match', ascending=False):
-        method = "GET"
-        path = "/mmm/v1/search/"
-        params = {
-            "q": query,
-            "page": page_num,
-            'sort': sort,
-        }
-
-        if minprice is not None:
-            params['minprice'] = minprice
-        if maxprice is not None:
-            params['maxprice'] = maxprice
-        if not ascending:
-            params['ascending'] = 'true'
-
-        r = self._request(False, method, path, params=params)
-        if r.status_code == 200:
-            return r.json()
-        else:
-            raise ServerRequestError(r.json()['error'])
-
-    # POST /mmm/v1/listings/
-    def mmm_create_listing(self, path, name, description, price, device_id):
-        method = "POST"
-        url = '/mmm/v1/listings/'
-        body = {
-            "name": name,
-            "description": description,
-            "price": price,
-            "path": path,
-            "server": device_id
-        }
-
-        data = json.dumps(body)
-
-        return self._request(self.username, method,
-                             url,
-                             data=data
-                             )
-
-    # todo implement update, maybe use separate command that takes in uuid
-    def mmm_update_listing(uuid):
-        # method = 'PUT'
-        # url = '{}/mmm/v1/listings/{}'.format(TWO1_DEV_HOST, uuid)
-        pass
-
-    def mmm_check_listing_exists(self):
-        pass
-        # import datetime
-        # method = "GET"
-        # url = "{}/mmm/v1/listings/".format(TWO1_DEV_HOST)
-        # params = {
-        #     "path": path,
-        #     "server": device_id
-        # }
-        # kwargs = {'params': params}
-        # headers = {}
-        # headers["Content-Type"] = "application/json"
-        # response = requests.request(method, url, headers=headers, **kwargs)
-        # if response.status_code == 200:
-        #     try:
-        #         existing_id = response.json()[0].get('id', None)
-        #     except IndexError:
-        #         existing_id = None
-        #     # if existing_id is not None:
-        #     #     method = 'PUT'
-        #     #     url = '{}/mmm/v1/listings/{}'.format(TWO1_DEV_HOST, existing_id)
-        #     # else:
-        # return existing_id
-
-    # PUT /mmm/listings/<id>
-    def mmm_delete_listing(self, path, name, description, price, device_uuid):
-        pass
-        # """Soft deletes listing by setting delete=True
-        # """
-        # method = "GET"
-        # url = "/mmm/v1/listings/"
-        # params = {
-        #     "server": device_uuid
-        # }
-        # response = self._request(True, method, url, params=params)
-        # if response.status_code == 201:
-        #     method = "PUT"
-        #     body = {
-        #         "name": name,
-        #         "description": description,
-        #         "price": price,
-        #         "path": path,
-        #         "server": device_uuid,
-        #         "deleted": True,
-        #         "active": False,
-        #         "last_active": datetime.datetime.now()
-        #     }
-        #     data = json.dumps(body)
-        #     return self._request(True, method, url, data=data)
-
-    # GET /mmm/listings/ -- list of listings that belong to this device
-    def mmm_device_listings(self, active=None, page_num=1):
-        pass
-        # method = "GET"
-        # path = "/mmm/v1/listings/"
-        # params = {
-        #     # should this take in device rather than username?
-        #     "username": self.username, "page": page_num,
-        #     "deleted": False
-        # }
-        # if active is True or active is False:
-        #     params['active'] = active
-        # r = self._request(
-        #     False, method, path, params=params)
-        # if r.status_code == 200:
-        #     return json.loads(r.content.decode())
-        # else:
-        #     raise
-
-    # POST /mmm/v1/ratings/
-    def mmm_rating_post(self, purchase, rating):
-        method = "POST"
-        path = "/mmm/v1/ratings/"
-        body = {
-            "purchase": purchase,  # uuid of purchase
-            "rating": rating
-        }
-        data = json.dumps(body)
-        r = self._request(False, method, path, data=data)
-
-        if (r.status_code == 201):  # 201 == Created, Success
-            #click.echo("Success!")
-            pass
-        elif r.status_code == 200:  # 200 == Success
-            click.echo("You made a review of this already")  # Nothing updated
-            # TODO: Prompt user to ask if they want to update score
-        else:
-            click.echo("Error: Bad request, check if purchase uuid is valid.")
-            #click.echo("%s (%s): %s" % (r.status_code, r.reason, r.text))
-        return r
-
-    # PUT /mmm/v1/ratings/c833e922-4cc1-4f6a-9d1f-181c839c0a08/
-    def mmm_rating_put(self, purchase, rating, num_updates):
-        method = "PUT"
-        path = "/mmm/v1/ratings/{}/".format(purchase)
-        num_updates += 1
-        body = {
-            "purchase": purchase,  # uuid of purchase
-            "rating": rating,
-            "num_updates": num_updates
-        }
-        data = json.dumps(body)
-        return self._request(False, method, path, data=data)
-
-    # GET /mmm/v1/ratings/c833e922-4cc1-4f6a-9d1f-181c839c0a08/
-    def mmm_rating_get(self, purchase, rating):
-        method = "GET"
-        path = "/mmm/v1/ratings/{}/".format(purchase)
-        num_updates = 1
-        body = {
-            "purchase": purchase,  # uuid of purchase
-            "rating": rating,
-            "num_updates": num_updates
-        }
-        data = json.dumps(body)
-        return self._request(False, method, path, data=data)
+    def get_ratings(self):
+        path = "/market/users/{}/ratings/".format(self.username)
+        return self._request(sign_username=self.username, method="GET", path=path)
 
     # GET /pool/statistics/{username}/earnings/
     def get_earnings(self):
         path = "/pool/statistics/%s/earnings/" % self.username
         return (self._request(sign_username=self.username,
-                             path=path).json())[self.username]
-
-    @staticmethod
-    def params2example(parameters, url):
-        """Parse Swagger output into 21 buy syntax.
-
-        https://godoc.org/github.com/emicklei/go-restful/swagger#Parameter
-        """
-        form, formstr, query, querystr = {}, "", {}, ""
-        for param in parameters:
-            if param['required']:
-                if param['paramType'] == 'form':
-                    form[param['name']] = "[%s]" % param['type']
-                elif param['paramType'] == 'body':
-                    #print(param)
-                    pass
-                elif param['paramType'] == 'query':
-                    query[param['name']] = "%s" % param['type']
-                elif param['paramType'] == 'path':
-                    #print(param)
-                    pass
-                if param['paramType'] == 'header':
-                    #print(param)
-                    pass
-        if len(query) > 0:
-            querystr = "?%s" % urllib.parse.urlencode(query)
-        if len(form) > 0:
-            formstr = "--data '%s'" % json.dumps(form)
-        return "21 buy %s%s %s" % (url, querystr, formstr)
-
-    # GET /docs/api-docs
-    def search(self, query="", detail=False, page_num=1):
-        """Search the Many Machine Market. If blank query, list all endpoints.
-        """
-        path = "/docs/api-docs"
-        data = self._request(path=path).json()
-        apis = []
-        for xx in data['apis']:
-            apipath = path + xx['path']
-            r = self._request(path=apipath).json()['apis']
-            apis.append(r)
-        fields = ("url", "method", "description", "price", "example")
-        Listing = namedtuple("Listing", fields)
-        listings = []
-        for api in apis:
-            for function in api:
-                ops = function['operations']
-                assert len(ops) == 1
-                url = self.server_url + function['path']
-                example = self.params2example(ops[0]['parameters'], url) \
-                    if detail else ""
-                ll = Listing(url=url,
-                             method=ops[0]['method'],
-                             description=function['description'],
-                             price=0,
-                             example=example)
-                if query == "":
-                    listings.append(ll)
-                else:
-                    if re.search(query, ll.url) or \
-                       re.search(query, ll.description):
-                        listings.append(ll)
-
-        return listings
+                              path=path).json())[self.username]
 
 
 if __name__ == "__main__":
     # host = "http://127.0.0.1:8000"
     from two1.commands.config import Config
     from two1.commands.config import TWO1_HOST
+
     conf = Config()
     host = TWO1_HOST
     for n in range(2):

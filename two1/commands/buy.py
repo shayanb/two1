@@ -1,8 +1,15 @@
+"""
+Buy from a machine-payable endpoint
+"""
+# standard python
 import json
-import click
 import datetime
 import re
 
+# 3rd party
+import click
+
+# two1 imports
 from two1.commands.status import _get_balances
 from two1.commands.config import TWO1_MERCHANT_HOST
 from two1.commands.config import TWO1_HOST
@@ -12,14 +19,12 @@ from two1.commands.formatters import sms_formatter
 from two1.lib.server.analytics import capture_usage
 from two1.lib.bitrequests import OnChainRequests
 from two1.lib.bitrequests import BitTransferRequests
+from two1.lib.bitrequests import ChannelRequests
 from two1.lib.bitrequests import ResourcePriceGreaterThanMaxPriceError
 from two1.lib.util.uxstring import UxString
-from two1.lib.wallet.utxo_selectors import DEFAULT_INPUT_FEE
-from two1.lib.wallet.utxo_selectors import DEFAULT_OUTPUT_FEE
+from two1.lib.wallet.fees import get_fees
+from two1.lib.channels.statemachine import PaymentChannelStateMachine
 
-
-# Two UTXO with one Output
-DEFAULT_ONCHAIN_BUY_FEE = (DEFAULT_INPUT_FEE * 2) + DEFAULT_OUTPUT_FEE
 
 URL_REGEXP = re.compile(
     r'^(?:http)s?://'  # http:// or https://
@@ -73,11 +78,18 @@ $ 21 buy sms -h
     ctx.obj["maxprice"] = maxprice
     ctx.obj["info_only"] = info_only
 
+    # Bypass subcommand if the user is only requesting its 402 information
+    if ctx.invoked_subcommand and ctx.invoked_subcommand != "url" and info_only:
+        _buy(ctx.obj["config"], ctx.invoked_subcommand,
+             None, None, None, None,
+             payment_method, maxprice, info_only)
+        ctx.exit()
 
-@click.argument('query', default="")
+
+@click.argument('query')
 @buy.command()
 @click.pass_context
-def search(ctx, query=""):
+def search(ctx, query):
     """Execute a search query for bitcoin. See no ads.
 
 \b
@@ -85,9 +97,6 @@ Example
 -------
 $ 21 buy search "First Bitcoin Computer"
 """
-    if query == "":
-        ctx.obj["info_only"] = True
-
     _buy(ctx.obj["config"],
          "search",
          dict(query=query),
@@ -96,12 +105,11 @@ $ 21 buy search "First Bitcoin Computer"
          None,
          ctx.obj["payment_method"],
          ctx.obj["maxprice"],
-         ctx.obj["info_only"]
-         )
+         ctx.obj["info_only"])
 
 
-@click.argument('body', default="")
-@click.argument('phone_number', default="")
+@click.argument('body')
+@click.argument('phone_number')
 @buy.command()
 @click.pass_context
 def sms(ctx, phone_number, body):
@@ -112,8 +120,6 @@ Example
 -------
 $ 21 buy sms +15005550002 "I just paid for this SMS with BTC"
 """
-    if phone_number == "" and body == "":
-        ctx.obj["info_only"] = True
     _buy(ctx.obj["config"],
          "sms",
          dict(phone=phone_number, text=body),
@@ -122,8 +128,7 @@ $ 21 buy sms +15005550002 "I just paid for this SMS with BTC"
          None,
          ctx.obj["payment_method"],
          ctx.obj["maxprice"],
-         ctx.obj["info_only"]
-         )
+         ctx.obj["info_only"])
 
 
 @click.argument('resource', nargs=1)
@@ -149,22 +154,46 @@ $ 21 buy url https://market.21.co/phone/send-sms --data '{"phone":"+15005550002"
          output_file,
          ctx.obj["payment_method"],
          ctx.obj["maxprice"],
-         ctx.obj["info_only"]
-         )
+         ctx.obj["info_only"])
 
 
 @capture_usage
 def _buy(config, resource, data, method, data_file, output_file,
          payment_method, max_price, info_only):
+    """
+    Buys bitcoin payable content over http
+
+    Todo:
+        reduce number of input args
+        Exception is too general, raise a different exception when user cannot pay
+
+    Args:
+        config (Config): config object used for getting .two1 information
+        resource (str): resource or content to purchase
+        method (str): HTTP request method, defaults to GET
+        data_file (str): name of the data file to send in HTTP body
+        output_file (str): Output file name
+        payment_method (str): Type of payment used in the purchase: offchain, onchain, channel
+        max_price (int): Max price of resource
+        info_only (bool): Flag which will only get info and not  purcahase the resource
+
+    Raises:
+        NotImplementedError: if endpoint or resource is not valid
+        ResourcePriceGreaterThanMaxPriceError: If the resource price is greater than the max price
+    """
     # If resource is a URL string, then bypass seller search
     if URL_REGEXP.match(resource):
         target_url = resource
+        seller = target_url
+    elif re.match(r'^(((\w*)(\/){0,1})(\w*)){0,2}(\/){0,1}$', resource) and resource not in DEMOS:
+        target_url = 'https://mkt.21.co/' + resource
         seller = target_url
     elif resource in DEMOS:
         target_url = TWO1_MERCHANT_HOST + DEMOS[resource]["path"]
         data = json.dumps(data)
     else:
-        raise NotImplementedError('Endpoint search is not implemented!')
+        # If we can't figure out the resource type, attempt to use `http`
+        target_url = 'http://' + resource
 
     # Change default HTTP method from "GET" to "POST", if we have data
     if method == "GET" and (data or data_file):
@@ -179,6 +208,16 @@ def _buy(config, resource, data, method, data_file, output_file,
             bit_req = BitTransferRequests(config.machine_auth, config.username)
         elif payment_method == 'onchain':
             bit_req = OnChainRequests(config.wallet)
+        elif payment_method == 'channel':
+            bit_req = ChannelRequests(config.wallet)
+            channel_list = bit_req._channelclient.list()
+            if not channel_list:
+                confirmed = click.confirm(UxString.buy_channel_warning.format(
+                    bit_req.DEFAULT_DEPOSIT_AMOUNT,
+                    PaymentChannelStateMachine.PAYMENT_TX_MIN_OUTPUT_AMOUNT), default=True)
+                if not confirmed:
+                    raise Exception(UxString.buy_channel_aborted)
+
         else:
             raise Exception('Payment method does not exist.')
 
@@ -193,9 +232,11 @@ def _buy(config, resource, data, method, data_file, output_file,
         config.log(UxString.Error.resource_price_greater_than_max_price.format(e))
         return
     except Exception as e:
+        f = get_fees()
+        buy_fee = 2 * f['per_input'] + f['per_output']
         if 'Insufficient funds.' in str(e):
             config.log(UxString.Error.insufficient_funds_mine_more.format(
-                DEFAULT_ONCHAIN_BUY_FEE
+                buy_fee
             ))
         else:
             config.log(str(e), fg="red")
@@ -215,14 +256,23 @@ def _buy(config, resource, data, method, data_file, output_file,
         # Write response to console
         config.log(res.text)
 
-    # Write the amount paid out
-    if not info_only:
+    # Write the amount paid out if something was truly paid
+    if not info_only and hasattr(res, 'amount_paid'):
         client = rest_client.TwentyOneRestClient(TWO1_HOST,
                                                  config.machine_auth,
                                                  config.username)
-        twentyone_balance, balance_c, pending_transactions, flushed_earnings = \
-            _get_balances(config, client)
-        config.log("You spent: %s Satoshis. Remaining 21.co balance: %s Satoshis." % (res.amount_paid, twentyone_balance))
+        user_balances = _get_balances(config, client)
+        if payment_method == 'offchain':
+            balance_amount = user_balances.twentyone
+            balance_type = '21.co'
+        elif payment_method == 'onchain':
+            balance_amount = user_balances.onchain
+            balance_type = 'blockchain'
+        elif payment_method == 'channel':
+            balance_amount = user_balances.channels
+            balance_type = 'payment channels'
+        config.log("You spent: %s Satoshis. Remaining %s balance: %s Satoshis." % (
+            res.amount_paid, balance_type, balance_amount))
 
     # Record the transaction if it was a payable request
     if hasattr(res, 'paid_amount'):

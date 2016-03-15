@@ -23,9 +23,9 @@ from two1.lib.util.uxstring import UxString
 MIN_VERSION_21 = (0, 3, 0)
 MIN_VERSION_OS = (1, 0, 0)
 if platform.system() == "Darwin":
-  MIN_VERSION_OS = (14, 0, 0)
+    MIN_VERSION_OS = (14, 0, 0)
 elif platform.system() == "Linux":
-  MIN_VERSION_OS = (4, 0, 0)
+    MIN_VERSION_OS = (4, 0, 0)
 MIN_VERSION_PYTHON = (3, 3, 0)
 SOCKET_TIMEOUT = 10
 DEMO_ENDPOINTS = [
@@ -33,6 +33,7 @@ DEMO_ENDPOINTS = [
     {"url": "/phone/send-sms", "method": "post"},
     {"url": "/search/bing", "method": "post"},
 ]
+
 
 @unique
 class DoctorStatus(Enum):
@@ -48,9 +49,10 @@ class DoctorStatus(Enum):
             color = "orange"
         return click.style(self.name, fg=color)
 
+
 class DoctorCheck:
     def __init__(self, config):
-        self.config = config;
+        self.config = config
         self.checks = []
         self.summary = {}
         self.passed = 0
@@ -106,7 +108,7 @@ class DoctorCheck:
             if total["warnings"] > 0:
                 final_status = DoctorStatus.Warning
 
-        config.log("\n{} / {} tests passed, {} warnings. [{}]\n".format(\
+        config.log("\n{} / {} tests passed, {} warnings. [{}]\n".format( \
             total["passed"],
             total["total"],
             total["warnings"],
@@ -118,12 +120,14 @@ class DoctorCheck:
             "summary": self.summary
         }
 
+
 @click.command()
 @json_output
 def doctor(config):
-    """Checks on the health of the tool.
+    """Checks the health of the 21 CLI.
     """
     return _doctor(config)
+
 
 @capture_usage
 def _doctor(config):
@@ -133,14 +137,13 @@ def _doctor(config):
         else:
             checker.addCheck(name, val, DoctorStatus.Fail, "{} != {}.".format(val, expected_val))
 
-    def assertTrue(checker, name, val, success_msg="Exists", error_msg = None):
+    def assertTrue(checker, name, val, success_msg="Exists", error_msg=None):
         if val == True or val == "Yes":
             checker.addCheck(name, success_msg, DoctorStatus.OK)
         else:
             if error_msg == None:
                 error_msg = "{} is not True.".format(val)
             checker.addCheck(name, "No", DoctorStatus.Fail, error_msg)
-
 
     def assertAny(checker, name, val):
         if val != None and val != "":
@@ -152,7 +155,8 @@ def _doctor(config):
         if val in expected_val_array:
             checker.addCheck(name, val, DoctorStatus.OK)
         else:
-            checker.addCheck(name, val, DoctorStatus.Fail, "{} must be one of {}".format(val, expected_val_array)) 
+            checker.addCheck(name, val, DoctorStatus.Fail,
+                             "{} must be one of {}".format(val, expected_val_array))
 
     def assertGte(checker, name, val, min_val):
         if val >= min_val:
@@ -162,7 +166,7 @@ def _doctor(config):
 
     def assertVersionGte(checker, name, version, min_version):
         ok = True
-        version_str = "{}.{}.{}".format(version[0],version[1],version[2])
+        version_str = "{}.{}.{}".format(version[0], version[1], version[2])
         # compare major
         if int(version[0]) > min_version[0]:
             ok = True
@@ -184,21 +188,29 @@ def _doctor(config):
         if ok:
             checker.addCheck(name, version_str, DoctorStatus.OK)
         else:
-            checker.addCheck(name, version_str, DoctorStatus.Fail, "Version must be >= {}.{}.{}. Your version is {}.{}.{}.".format(min_version[0], min_version[1], min_version[2], version[0],version[1],version[2]))
+            checker.addCheck(name, version_str, DoctorStatus.Fail,
+                             "Version must be >= {}.{}.{}. Your version is {}.{}.{}.".format(
+                                 min_version[0], min_version[1], min_version[2], version[0],
+                                 version[1], version[2]))
 
     def assertHTTPStatusCode(checker, name, url, method="get", expected_status_code=402):
-      try:
-          request_method = getattr(requests, method)
-          r  = request_method(url, timeout=SOCKET_TIMEOUT)
-          if r.status_code == expected_status_code:
-              checker.addCheck("{} {}".format(method.upper(), name), r.status_code, DoctorStatus.OK)
-          else:
-              checker.addCheck("{} {}".format(method.upper(), name), r.status_code, DoctorStatus.Fail, "Expected status code '{}'".format(expected_status_code))
-      except requests.exceptions.ConnectionError:
-          checker.addCheck("{} {}".format(method.upper(), name), "Failed", DoctorStatus.Fail, "Could not connect to '{}'".format(url))
-      except Exception as e:
-          checker.addCheck("{} {}".format(method.upper(), name), "Failed", DoctorStatus.Fail, str(e))
-    
+        try:
+            request_method = getattr(requests, method)
+            r = request_method(url, timeout=SOCKET_TIMEOUT)
+            if r.status_code == expected_status_code:
+                checker.addCheck("{} {}".format(method.upper(), name), r.status_code,
+                                 DoctorStatus.OK)
+            else:
+                checker.addCheck("{} {}".format(method.upper(), name), r.status_code,
+                                 DoctorStatus.Fail,
+                                 "Expected status code '{}'".format(expected_status_code))
+        except requests.exceptions.ConnectionError:
+            checker.addCheck("{} {}".format(method.upper(), name), "Failed", DoctorStatus.Fail,
+                             "Could not connect to '{}'".format(url))
+        except Exception as e:
+            checker.addCheck("{} {}".format(method.upper(), name), "Failed", DoctorStatus.Fail,
+                             str(e))
+
     def assertSocket(checker, name, url):
         protocol = "http"
         port = 80
@@ -239,11 +251,12 @@ def _doctor(config):
         except Exception as e:
             pass
         if error_msg == None:
-          error_msg = "'{}' does not exist.".format(cmd)
+            error_msg = "'{}' does not exist.".format(cmd)
         assertTrue(check_dependencies, name, cmd_path != None, error_msg=error_msg)
 
     def assertPathExists(checker, name, path):
-        return assertTrue(checker, name, os.path.exists(path), error_msg="'{}' does not exist.".format(path))
+        return assertTrue(checker, name, os.path.exists(path),
+                          error_msg="'{}' does not exist.".format(path))
 
     # doctor code start
     config.log(UxString.doctor_start)
@@ -254,27 +267,32 @@ def _doctor(config):
     assertVersionGte(check_general, "21 Tool version", TWO1_VERSION.split('.'), MIN_VERSION_21)
     assertIn(check_general, "OS System", platform.system(), ["Windows", "Linux", "Darwin"])
     assertVersionGte(check_general, "OS Release", platform.release().split('.'), MIN_VERSION_OS)
-    assertVersionGte(check_general, "Python version", platform.python_version_tuple(), MIN_VERSION_PYTHON)
-    assertTrue(check_general, "Has Bitcoin kit", has_bitcoinkit(), success_msg="Yes", error_msg="Bitcoin kit not detected.")
+    assertVersionGte(check_general, "Python version", platform.python_version_tuple(),
+                     MIN_VERSION_PYTHON)
+    assertTrue(check_general, "Has Bitcoin kit", has_bitcoinkit(), success_msg="Yes",
+               error_msg="Bitcoin kit not detected.")
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
         assertAny(check_general, "IP Address", s.getsockname()[0])
-    except Exception as e: 
+    except Exception as e:
         assertTrue(check_general, "IP Address", False, error_msg="No Internet Connectivity Found.")
     check_general.generateSummary()
 
     # Checking dependencies
     config.log(UxString.doctor_dependencies)
     check_dependencies = DoctorCheck(config)
-    assertTrue(check_dependencies, "two1 python library", 'two1' in sys.modules, error_msg="two1 lib does not exist.")
+    assertTrue(check_dependencies, "two1 python library", 'two1' in sys.modules,
+               error_msg="two1 lib does not exist.")
     cli_path = None
     try:
         cli_path = shutil.which('21')
     except Exception as e:
         pass
-    assertCommandExists(check_dependencies, "21 CLI", cmd="21", error_msg="21 CLI not bound to '21'.")
-    assertCommandExists(check_dependencies, "Zerotier CLI", cmd="zerotier-cli", error_msg="Zerotier CLI not bound.")
+    assertCommandExists(check_dependencies, "21 CLI", cmd="21",
+                        error_msg="21 CLI not bound to '21'.")
+    assertCommandExists(check_dependencies, "Zerotier CLI", cmd="zerotier-cli",
+                        error_msg="Zerotier CLI not bound.")
     assertCommandExists(check_dependencies, "apt-get", cmd="apt-get")
     assertCommandExists(check_dependencies, "minerd", cmd="minerd")
     assertCommandExists(check_dependencies, "wallet", cmd="wallet")
@@ -287,7 +305,9 @@ def _doctor(config):
     config.log(UxString.doctor_demo_endpoints)
     check_demos = DoctorCheck(config)
     for demo_endpoint in DEMO_ENDPOINTS:
-        assertHTTPStatusCode(check_demos, name=demo_endpoint["url"], url=(TWO1_MERCHANT_HOST + demo_endpoint["url"]), method=demo_endpoint["method"], expected_status_code=402)
+        assertHTTPStatusCode(check_demos, name=demo_endpoint["url"],
+                             url=(TWO1_MERCHANT_HOST + demo_endpoint["url"]),
+                             method=demo_endpoint["method"], expected_status_code=402)
     check_demos.generateSummary()
 
     # Check servers
@@ -301,25 +321,25 @@ def _doctor(config):
     assertSocket(check_servers, "PyPi Host", TWO1_PYPI_HOST)
     assertHTTPStatusCode(check_servers, name="21co slack", url="https://slack.21.co", expected_status_code=200)
     assertHTTPStatusCode(check_servers, name="Raspbian package repo", url="http://mirrordirector.raspbian.org/raspbian", expected_status_code=200)
-    assertHTTPStatusCode(check_servers, name="Chain.com API", url="https://api.chain.com", expected_status_code=401)
     
     check_servers.generateSummary()
 
     config.log(UxString.doctor_total)
     DoctorCheck.printSummary(config, \
-        check_general.summary, \
-        check_dependencies.summary, \
-        check_demos.summary, \
-        check_servers.summary)
+                             check_general.summary, \
+                             check_dependencies.summary, \
+                             check_demos.summary, \
+                             check_servers.summary)
 
-    result =  {
+    result = {
         "general": check_general.json(),
         "dependencies": check_dependencies.json(),
         "demo": check_demos.json(),
         "servers": check_servers.json()
     }
 
-    if all([doctor_check['summary']['total'] == doctor_check['summary']['passed'] for doctor_check in result.values()]):
+    if all([doctor_check['summary']['total'] == doctor_check['summary']['passed'] for doctor_check
+            in result.values()]):
         return result
     else:
         raise TwoOneError("21 doctor failed some checks.", result)

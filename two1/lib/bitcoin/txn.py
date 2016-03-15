@@ -1,10 +1,15 @@
+"""This submodule provides Transaction, Coinbase, TransactionInput,
+TransactionOutput, and UnspentTransactionOutput classes for building and
+parsing Bitcoin transactions and their constituent inputs and outputs."""
 import copy
 import hashlib
 import struct
 
 from two1.lib.bitcoin import crypto
+from two1.lib.bitcoin.exceptions import ScriptInterpreterError
 from two1.lib.bitcoin.hash import Hash
 from two1.lib.bitcoin.script import Script
+from two1.lib.bitcoin.script_interpreter import ScriptInterpreter
 from two1.lib.bitcoin.utils import address_to_key_hash
 from two1.lib.bitcoin.utils import bytes_to_str
 from two1.lib.bitcoin.utils import pack_compact_int
@@ -135,6 +140,17 @@ class CoinbaseInput(TransactionInput):
                          scr,
                          sequence)
 
+    def get_addresses(self, testnet=False):
+        """ Returns all addresses associated with the script in this input.
+
+        Args:
+            testnet (bool): True if the transaction is a testnet transaction.
+
+        Returns:
+            list (str): A list of all addresses found in the script.
+        """
+        return []
+
     def __str__(self):
         """ Returns a human readable formatting of this input.
 
@@ -218,7 +234,7 @@ class TransactionOutput(object):
 
         Returns:
             b (bytes): byte stream containing the serialized
-                 transaction output.
+            transaction output.
         """
         return pack_u64(self.value) + pack_var_str(bytes(self.script))
 
@@ -250,6 +266,14 @@ class UnspentTransactionOutput(object):
 
     @property
     def confirmed(self):
+        """ Returns whether the unspect transaction output is confirmed.
+
+        This method uses six (6) blocks as a threshhold to determine whether
+        the transaction is considered 'confirmed'.
+
+        Returns:
+            bool: True if confirmed, False otherwise.
+        """
         return self.num_confirmations >= 6
 
 
@@ -388,6 +412,98 @@ class Transaction(object):
 
         return private_key.public_key.compressed_bytes if compressed else bytes(pub_key)
 
+    def _match_public_key(self, private_key, sub_script):
+        multisig = False
+        multisig_params = None
+        multisig_key_index = -1
+
+        if sub_script.is_multisig_redeem():
+            multisig = True
+            multisig_params = sub_script.extract_multisig_redeem_info()
+
+        rv = dict(match=False,
+                  info=dict(multisig=multisig,
+                            multisig_key_index=-1,
+                            compressed=False))
+        if multisig:
+            # Determine which of the public keys this private key
+            # corresponds to.
+            public_keys = multisig_params['public_keys']
+            pub_key_full = self._get_public_key_bytes(private_key, False)
+            pub_key_comp = self._get_public_key_bytes(private_key, True)
+
+            compressed = False
+            for i, p in enumerate(public_keys):
+                if pub_key_full == p or pub_key_comp == p:
+                    multisig_key_index = i
+                    compressed = pub_key_comp == p
+                    break
+
+            if multisig_key_index != -1:
+                rv['match'] = True
+                rv['info']['multisig_key_index'] = multisig_key_index
+                rv['info']['compressed'] = compressed
+        else:
+            script_pub_key_h160 = sub_script.get_hash160()
+            if script_pub_key_h160 is None:
+                raise ValueError("Couldn't find public key hash in sub_script!")
+
+            # first try uncompressed key
+            h160 = None
+            for compressed in [True, False]:
+                h160 = private_key.public_key.hash160(compressed)
+                if h160 != script_pub_key_h160:
+                    h160 = None
+                else:
+                    break
+
+            if h160 is not None:
+                rv['match'] = True
+                rv['info']['compressed'] = compressed
+
+        return rv
+
+    def get_signature_for_input(self, input_index, hash_type, private_key,
+                                sub_script):
+        """ Returns the signature for an input.
+
+            This function only returns the signature for an input, it
+            does not insert the signature into the script member of
+            the input. It also does not validate that the given private key
+            matches any public keys in the sub_script.
+
+        Args:
+            input_index (int): The index of the input to sign.
+            hash_type (int): What kind of signature hash to do.
+            private_key (crypto.PrivateKey): private key with which
+                to sign the transaction.
+            sub_script (Script): the scriptPubKey of the corresponding
+                utxo being spent if the outpoint is P2PKH or the redeem
+                script if the outpoint is P2SH.
+
+        Returns:
+            tuple: A tuple containing the signature object and the message that
+                was signed.
+        """
+        if input_index < 0 or input_index >= len(self.inputs):
+            raise ValueError("Invalid input index.")
+
+        tmp_script = sub_script.remove_op("OP_CODESEPARATOR")
+        if hash_type & 0x1f == self.SIG_HASH_SINGLE and len(self.inputs) > len(self.outputs):
+            # This is to deal with the bug where specifying an index
+            # that is out of range (wrt outputs) results in a
+            # signature hash of 0x1 (little-endian)
+            msg_to_sign = 0x1.to_bytes(32, 'little')
+        else:
+            txn_copy = self._copy_for_sig(input_index, hash_type, tmp_script)
+
+            msg_to_sign = bytes(Hash.dhash(bytes(txn_copy) +
+                                           pack_u32(hash_type)))
+
+        sig = private_key.sign(msg_to_sign, False)
+
+        return sig, msg_to_sign
+
     def sign_input(self, input_index, hash_type, private_key, sub_script):
         """ Signs an input.
 
@@ -405,81 +521,42 @@ class Transaction(object):
 
         inp = self.inputs[input_index]
 
-        curr_script_sig = inp.script
         multisig = False
-        multisig_params = None
-        multisig_key_index = -1
         if sub_script.is_multisig_redeem():
             multisig = True
-            multisig_params = sub_script.extract_multisig_redeem_info()
         elif not sub_script.is_p2pkh():
             raise TypeError("Signing arbitrary redeem scripts is not currently supported.")
 
         tmp_script = sub_script.remove_op("OP_CODESEPARATOR")
 
-        compressed = False
-        if hash_type & 0x1f == self.SIG_HASH_SINGLE and len(self.inputs) > len(self.outputs):
-            # This is to deal with the bug where specifying an index
-            # that is out of range (wrt outputs) results in a
-            # signature hash of 0x1 (little-endian)
-            msg_to_sign = 0x1.to_bytes(32, 'little')
-        else:
-            txn_copy = self._copy_for_sig(input_index, hash_type, tmp_script)
-
+        # Before signing we should verify that the address in the
+        # sub_script corresponds to that of the private key
+        m = self._match_public_key(private_key, tmp_script)
+        if not m['match']:
             if multisig:
-                # Determine which of the public keys this private key
-                # corresponds to.
-                public_keys = multisig_params['public_keys']
-                pub_key_full = self._get_public_key_bytes(private_key, False)
-                pub_key_comp = self._get_public_key_bytes(private_key, True)
-
-                for i, p in enumerate(public_keys):
-                    if pub_key_full == p or pub_key_comp == p:
-                        multisig_key_index = i
-                        break
-
-                if multisig_key_index == -1:
-                    raise ValueError(
-                        "Public key derived from private key does not match any of the public keys in redeem script.")
+                msg = "Public key derived from private key does not match any of the public keys in redeem script."
             else:
-                # Before signing we should verify that the address in the
-                # sub_script corresponds to that of the private key
-                script_pub_key_h160_hex = tmp_script.get_hash160()
-                if script_pub_key_h160_hex is None:
-                    raise ValueError("Couldn't find public key hash in sub_script!")
+                msg = "Address derived from private key does not match sub_script!"
+            raise ValueError(msg)
 
-                # first try uncompressed key
-                h160 = None
-                for compressed in [True, False]:
-                    h160 = private_key.public_key.hash160(compressed)
-                    if h160 != bytes.fromhex(script_pub_key_h160_hex[2:]):
-                        h160 = None
-                    else:
-                        break
-
-                if h160 is None:
-                    raise ValueError("Address derived from private key does not match sub_script!")
-
-            msg_to_sign = bytes(Hash.dhash(bytes(txn_copy) +
-                                           pack_u32(hash_type)))
-
-        sig = private_key.sign(msg_to_sign, False)
+        sig, signed_message = self.get_signature_for_input(
+            input_index, hash_type, private_key, sub_script)
 
         if multisig:
             # For multisig, we need to determine if there are already
             # signatures and if so, where we insert this signature
-            inp.script = self._do_multisig_script([dict(index=multisig_key_index,
-                                                        signature=sig)],
-                                                  msg_to_sign,
-                                                  curr_script_sig,
-                                                  tmp_script,
-                                                  hash_type)
+            inp.script = self._do_multisig_script(
+                [dict(index=m['info']['multisig_key_index'],
+                      signature=sig)],
+                signed_message,
+                inp.script,
+                tmp_script,
+                hash_type)
         else:
-            pub_key_bytes = self._get_public_key_bytes(private_key, compressed)
-            pub_key_str = pack_var_str(pub_key_bytes)
-            script_sig = pack_var_str(
-                sig.to_der() + pack_compact_int(hash_type)) + pub_key_str
-            inp.script = Script(script_sig)
+            pub_key_bytes = self._get_public_key_bytes(private_key,
+                                                       m['info']['compressed'])
+            inp.script = Script([sig.to_der() + pack_compact_int(hash_type),
+                                 pub_key_bytes])
 
         return True
 
@@ -564,34 +641,23 @@ class Transaction(object):
     def verify_input_signature(self, input_index, sub_script):
         """ Verifies the signature for an input.
 
-            This also confirms that the HASH160 in the provided sub_script
-            corresponds with that found in the input sigScript.
+        This also confirms that the HASH160 in the provided sub_script
+        corresponds with that found in the input sigScript.
 
         Args:
             input_index (int): The index of the input to verify.
-            sub_script (Script): The P2SH script in the corresponding outpoint.
+            sub_script (Script): The script in the corresponding outpoint.
 
         Returns:
             bool: True if the sigScript is verified, False otherwise.
         """
-        # First extract the signature script
-        sig_script = self.inputs[input_index].script
-
-        # Both of these will eventually get replaced with a generic
-        # script interpreter & verifier.
-        rv = False
-        if sig_script.is_multisig_sig():
-            rv = self._verify_p2sh_multisig_input(input_index, sub_script)
-        elif sub_script.is_p2pkh():
-            rv = self._verify_p2pkh_input(input_index, sub_script)
-
-        return rv
+        return self._verify_input(input_index, sub_script)
 
     def verify_partial_multisig(self, input_index, sub_script):
         """ Verifies a partially signed multi-sig input.
 
-            This also confirms that the HASH160 in the provided sub_script
-            corresponds with that found in the input sigScript.
+        This also confirms that the HASH160 in the provided sub_script
+        corresponds with that found in the input sigScript.
 
         Args:
             input_index (int): The index of the input to verify.
@@ -600,177 +666,58 @@ class Transaction(object):
         Returns:
             bool: True if > 1 and <= m signatures verify the input.
         """
-        return self._verify_p2sh_multisig_input(input_index, sub_script, True)
+        return self._verify_input(input_index, sub_script, True)
 
-    def _verify_p2pkh_input(self, input_index, sub_script):
-        if not sub_script.is_p2pkh():
-            raise TypeError("sub_script is not a P2PKH script!")
+    def _verify_input(self, input_index, sub_script, partial_multisig=False):
+        p2sh = sub_script.is_p2sh()
 
-        rv = False
         sig_script = self.inputs[input_index].script
 
-        # Use a fake stack
-        stack = []
+        si = ScriptInterpreter(txn=self,
+                               input_index=input_index,
+                               sub_script=sub_script)
+        try:
+            si.run_script(sig_script)
+        except ScriptInterpreterError:
+            return False
 
-        # Push sigScript and publicKey onto stack
-        stack.append(bytes.fromhex(sig_script.ast[0][2:]))
-        stack.append(bytes.fromhex(sig_script.ast[1][2:]))
-
-        # OP_DUP
-        stack.append(stack[-1])
-
-        # OP_HASH160
-        pub_key_bytes = stack.pop()
-        pub_key = crypto.PublicKey.from_bytes(pub_key_bytes)
-        # Was it compressed?
-        compressed = pub_key_bytes[0] in [0x02, 0x03]
-        hash160 = pub_key.hash160(compressed=compressed)
-
-        # OP_EQUALVERIFY - this pub key must match the one in
-        # sub_script
-        sub_script_pub_key_hash = bytes.fromhex(sub_script.get_hash160()[2:])
-        rv = hash160 == sub_script_pub_key_hash
-
-        # OP_CHECKSIG
-        stack.pop()  # pop duplicate pub key off stack
-        script_sig_complete = stack.pop()
-        script_sig, hash_type = script_sig_complete[:-1], script_sig_complete[-1]
-
-        # Re-create txn for sig verification
-        txn_copy_bytes = bytes(self._copy_for_sig(input_index,
-                                                  hash_type,
-                                                  sub_script))
-
-        # Now verify
-        sig = crypto.Signature.from_der(script_sig)
-        msg = txn_copy_bytes + pack_u32(hash_type)
-        tx_digest = hashlib.sha256(msg).digest()
-        rv &= pub_key.verify(tx_digest, sig)
-
-        return rv
-
-    def _verify_p2sh_multisig_input(self, input_index, sub_script,
-                                    partial=False):
-        if not sub_script.is_p2sh():
-            raise TypeError("sub_script is not a P2SH script!")
-
-        rv = False
-        sig_script = self.inputs[input_index].script
-
-        if not sig_script.is_multisig_sig():
-            raise TypeError("sigScript doesn't appear to be a multisig signature script")
-
-        stack = []
-        sig_info = sig_script.extract_multisig_sig_info()
-
-        stack.append(bytes([Script.BTC_OPCODE_TABLE[sig_script.ast[0]]]))  # Push OP_0
-
-        # Push all the signatures
-        hash_types = set()
-        for s in sig_info['signatures']:
-            s1, hash_type = s[:-1], s[-1]
-            stack.append(s1)
-            hash_types.add(hash_type)
-
-        if len(hash_types) != 1:
-            raise TypeError("Not all signatures have the same hash type!")
-
-        hash_type = hash_types.pop()
-        redeem_script = sig_info['redeem_script']
-        redeem_script_h160 = redeem_script.hash160()
-
-        # Re-create txn for sig verification
-        txn_copy_bytes = bytes(self._copy_for_sig(input_index,
-                                                  hash_type,
-                                                  redeem_script))
-        msg = txn_copy_bytes + pack_u32(hash_type)
-        txn_digest = hashlib.sha256(msg).digest()
-
-        sub_script_h160 = bytes.fromhex(sub_script.get_hash160()[2:])
-        rv = redeem_script_h160 == sub_script_h160
-
-        rs_info = redeem_script.extract_multisig_redeem_info()
-        # Now start pushing the elements of the redeem script
-        stack.append(bytes([0x50 + rs_info['m']]))
-        for p in rs_info['public_keys']:
-            stack.append(p)
-        stack.append(bytes([0x50 + rs_info['n']]))
+        # This copy_stack and the restore_stack emulate the behavior
+        # found in bitcoin core for evaluating P2SH scripts. See:
+        # https://github.com/bitcoin/bitcoin/blob/master/src/script/interpreter.cpp#L1170
+        if p2sh:
+            si.copy_stack()
 
         try:
-            res, match_count = self._op_checkmultisig(stack=stack,
-                                                      txn_digest=txn_digest,
-                                                      partial=partial)
-            if partial:
-                rv &= match_count > 0 and match_count <= len(sig_info['signatures'])
-            else:
-                rv &= res
-        except Exception as e:
-            rv = False
+            si.run_script(sub_script)
+        except ScriptInterpreterError:
+            return False
+        rv = si.valid
+
+        if p2sh:
+            si.restore_stack()
+            redeem_script = Script(si.stack.pop())
+            si._sub_script = redeem_script
+
+            try:
+                if sig_script.is_multisig_sig() and partial_multisig:
+                    # This is a hack for partial verification
+                    partial_script = copy.deepcopy(redeem_script)
+                    partial_script.ast[-1] = 'OP_CHECKPARTIALMULTISIG'
+
+                    sig_info = sig_script.extract_multisig_sig_info()
+                    si.run_script(partial_script)
+                    rv &= si.match_count > 0 and si.match_count <= len(sig_info['signatures'])
+                else:
+                    si.run_script(redeem_script)
+                    rv &= si.valid
+            except:
+                rv = False
 
         return rv
-
-    def _op_checkmultisig(self, stack, txn_digest, partial=False):
-        # This belongs in Script, and will get moved later
-        num_keys = int.from_bytes(stack.pop(), byteorder='big') - 0x50
-        keys_bytes = []
-        for i in range(num_keys):
-            keys_bytes.insert(0, stack.pop())
-        public_keys = [crypto.PublicKey.from_bytes(p) for p in keys_bytes]
-
-        min_num_sigs = int.from_bytes(stack.pop(), byteorder='big') - 0x50
-
-        # Although "m" is the *minimum* number of required signatures, bitcoin
-        # core only consumes "m" signatures and then expects an OP_0. This
-        # means that if m < min_num_sigs <= n, bitcoin core will return a
-        # script failure. See:
-        # https://github.com/bitcoin/bitcoin/blob/0.10/src/script/interpreter.cpp#L840
-        # We will do the same.
-        sigs = []
-        for i in range(min_num_sigs):
-            s = stack.pop()
-            try:
-                sig = crypto.Signature.from_der(s)
-                sigs.insert(0, sig)
-            except ValueError:
-                if partial:
-                    # Put it back on stack
-                    stack.append(s)
-                else:
-                    # If not a partial evaluation there are not enough
-                    # sigs
-                    rv = False
-                break
-
-        # Now we verify
-        last_match = -1
-        rv = True
-        match_count = 0
-        for sig in sigs:
-            matched_any = False
-            for i, pub_key in enumerate(public_keys[last_match+1:]):
-                if pub_key.verify(txn_digest, sig):
-                    last_match = i
-                    match_count += 1
-                    matched_any = True
-                    break
-
-            if not matched_any:
-                # Bail early if the sig couldn't be verified
-                # by any public key
-                rv = False
-                break
-
-        rv &= match_count >= min_num_sigs
-
-        # Now make sure the last thing on the stack is OP_0
-        rv &= stack.pop() == bytes([0])
-        rv &= len(stack) == 0
-
-        return rv, match_count
 
     def output_index_for_address(self, address_or_hash160):
         """ Returns the index of the output in this transaction
-            that pays to the provided address.
+        that pays to the provided address.
 
         Args:
             address_or_hash160 (str or bytes): If a string, a
@@ -781,10 +728,9 @@ class Transaction(object):
             int: The index of the corresponding output or None.
         """
         if isinstance(address_or_hash160, str):
-            ver, h160_bytes = address_to_key_hash(address_or_hash160)
-            h160 = bytes_to_str(h160_bytes)
+            ver, h160 = address_to_key_hash(address_or_hash160)
         elif isinstance(address_or_hash160, bytes):
-            h160 = bytes_to_str(address_or_hash160)
+            h160 = address_or_hash160
         else:
             raise TypeError("address_or_hash160 can only be bytes or str")
 
@@ -792,7 +738,7 @@ class Transaction(object):
         for i, o in enumerate(self.outputs):
             scr = o.script
             if scr.is_p2pkh() or scr.is_p2sh():
-                if scr.get_hash160()[2:] == h160:
+                if scr.get_hash160() == h160:
                     rv = i
                     break
 

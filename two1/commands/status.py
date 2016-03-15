@@ -1,19 +1,40 @@
+"""
+View the status of mining and machine-payable purchases
+"""
+import click
+# standard python imports
+import urllib.parse
+import collections
+
+# 3rd party imports
 import click
 from tabulate import tabulate
+
+# two1 imports
+import two1.lib.channels as channels
+from two1.lib.channels.cli import format_expiration_time
 from two1.lib.server import rest_client
 from two1.commands.config import TWO1_HOST
 from two1.lib.server.analytics import capture_usage
-from two1.lib.util.decorators import json_output
+from two1.lib.util.decorators import json_output, check_notifications
 from two1.lib.util.uxstring import UxString
 
+Balances = collections.namedtuple('Balances', ['twentyone', 'onchain', 'pending', 'flushed', 'channels'])
+
+
 def has_bitcoinkit():
-    """Quick check for presence of mining chip via file presence.
+    """ Check for presence of mining chip via file presence
 
     The full test is to actually try to boot the chip, but we
     only try that if this file exists.
 
     We keep this file in two1/commands/status to avoid a circular
     import.
+    Todo:
+        Move out of status
+
+    Returns:
+        bool: True if device is a bitcoin computer, false otherwise
     """
     try:
         with open("/proc/device-tree/hat/product", "r") as f:
@@ -24,7 +45,10 @@ def has_bitcoinkit():
 
 
 def get_hashrate():
-    """Return hashrate of mining chip on current system.
+    """ Uses unix socks to get hashrate of mining chip on current system
+
+    Returns:
+        str: A formatted string showing the mining hashrate
     """
     hashrate = None
 
@@ -71,6 +95,15 @@ def get_hashrate():
 
 
 def status_mining(config, client):
+    """ Prints the mining status if the device has a mining chip
+
+    Args:
+        config (Config): config object used for getting .two1 information
+        client (TwentyOneRestClient): rest client used for communication with the backend api
+
+    Returns:
+        dict: a dictionary containing 'is_mining', 'hashrate', and 'mined' values
+    """
     has_chip = has_bitcoinkit()
     if has_chip:
         bk = "21 mining chip running (/run/minerd.pid)"
@@ -103,7 +136,18 @@ def status(config, detail):
 
 
 @capture_usage
+@check_notifications
 def _status(config, detail):
+    """ Reports two1 stataus including balances, username, and mining hashrate
+
+    Args:
+        config (Config): config object used for getting .two1 information
+        detail (bool): Lists all balance details in status report
+
+    Returns:
+        dict: a dictionary of 'account', 'mining', and 'wallet' items with formatted
+            strings for each value
+    """
     client = rest_client.TwentyOneRestClient(TWO1_HOST,
                                              config.machine_auth,
                                              config.username)
@@ -122,44 +166,73 @@ def _status(config, detail):
     return status
 
 def status_account(config):
+    """ Logs a formatted string displaying account status to the command line
+
+    Args:
+        config (Config): config object used for getting .two1 information
+
+    Returns:
+        str: formatted string displaying account status
+    """
     status_account = {
         "username": config.username,
         "address": config.wallet.current_address
     }
-    config.log(UxString.status_account.format(**status_account))
+    config.log(UxString.status_account.format(status_account["username"]))
     return status_account
 
-SEARCH_UNIT_PRICE = 800
-SMS_UNIT_PRICE = 1000
+SEARCH_UNIT_PRICE = 3500
+SMS_UNIT_PRICE = 3000
 
 
 def status_wallet(config, client, detail=False):
-    """Print wallet status to the command line.
+    """ Logs a formatted string displaying wallet status to the command line
+
+    Args:
+        config (Config): config object used for getting .two1 information
+        client (TwentyOneRestClient): rest client used for communication with the backend api
+        detail (bool): Lists all balance details in status report
+
+    Returns:
+        dict: a dictionary of 'wallet' and 'buyable' items with formatted
+            strings for each value
     """
-    twentyone_balance, onchain, pending_transactions, flushed_earnings = \
-        _get_balances(config, client)
+    user_balances = _get_balances(config, client)
+
+    status_wallet = {
+        "twentyone_balance": user_balances.twentyone,
+        "onchain": user_balances.onchain,
+        "flushing": user_balances.flushed,
+        "channels_balance": user_balances.channels
+    }
+    config.log(UxString.status_wallet.format(**status_wallet))
 
     if detail:
         # show balances by address for default wallet
         address_balances = config.wallet.balances_by_address(0)
-        byaddress = ["Addresses:"]
+        status_addresses = []
         for addr, balances in address_balances.items():
             if balances['confirmed'] > 0 or balances['total'] > 0:
-                byaddress.append("{}: {} (confirmed), {} (total)".format(
+                status_addresses.append(UxString.status_wallet_address.format(
                     addr, balances['confirmed'], balances['total']))
-        byaddress = '\n      '.join(byaddress)
+
+        # Display status for all payment channels
+        status_channels = []
+        for url in config.channel_client.list():
+            status = config.channel_client.status(url)
+            url = urllib.parse.urlparse(url)
+            status_channels.append(UxString.status_wallet_channel.format(
+                url.scheme, url.netloc, status.state, status.balance,
+                format_expiration_time(status.expiration_time)))
+        if not len(status_channels):
+            status_channels = [UxString.status_wallet_channels_none]
+
+        config.log(UxString.status_wallet_detail_on.format(
+            addresses=''.join(status_addresses), channels=''.join(status_channels)))
     else:
-        byaddress = "To see all wallet addresses, do 21 status --detail"
+        config.log(UxString.status_wallet_detail_off)
 
-    status_wallet = {
-        "twentyone_balance": twentyone_balance,
-        "onchain": onchain,
-        "flushing": flushed_earnings,
-        "byaddress": byaddress
-    }
-    config.log(UxString.status_wallet.format(**status_wallet))
-
-    total_balance = twentyone_balance + onchain
+    total_balance = user_balances.twentyone + user_balances.onchain
     buyable_searches = int(total_balance / SEARCH_UNIT_PRICE)
     buyable_sms = int(total_balance / SMS_UNIT_PRICE)
     status_buyable = {
@@ -195,32 +268,43 @@ def _get_balances(config, client):
     data = client.get_earnings()
     twentyone_balance = data["total_earnings"]
     flushed_earnings = data["flushed_amount"]
+    config.channel_client.sync()
+    channel_urls = config.channel_client.list()
+    channels_balance = sum(s.balance for s in (config.channel_client.status(url) for url in channel_urls)
+                           if s.state == channels.PaymentChannelState.READY)
 
-    return twentyone_balance, spendable_balance, pending_transactions, flushed_earnings
+    return Balances(twentyone_balance, spendable_balance, pending_transactions,
+                    flushed_earnings, channels_balance)
 
 
 def status_earnings(config, client):
+    """ Logs a formatted string displaying earnings status to the command line
+
+    Args:
+        config (Config): config object used for getting .two1 information
+        client (TwentyOneRestClient): rest client used for communication with the backend api
+    """
     data = client.get_earnings()
     total_earnings = data["total_earnings"]
     total_payouts = data["total_payouts"]
     config.log('\nMining Proceeds', fg='magenta')
-    config.log('''\
+    config.log('''
     Total Earnings           : {}
-    Total Payouts            : {}'''
-               .format(none2zero(total_earnings),
-                       none2zero(total_payouts))
-               )
+    Total Payouts            : {}''' .format(none2zero(total_earnings), none2zero(total_payouts)))
 
     if "flush_amount" in data and data["flush_amount"] > 0:
         flush_amount = data["flush_amount"]
-        config.log('''\
-    Flushed Earnings         : {}'''
-                   .format(none2zero(flush_amount)),
-                   )
+        config.log("Flushed Earnings         : {}" .format(none2zero(flush_amount)))
         config.log("\n" + UxString.flush_status % flush_amount, fg='green')
 
 
 def status_shares(config, client):
+    """ Logs a formatted string displaying shares status to the command line
+
+    Args:
+        config (Config): config object used for getting .two1 information
+        client (TwentyOneRestClient): rest client used for communication with the backend api
+    """
     try:
         share_data = client.get_shares()
     except:
@@ -245,5 +329,5 @@ def status_shares(config, client):
 
 
 def none2zero(x):
-    # function to map None values of shares to 0
+    """ function to map None values of shares to 0 """
     return 0 if x is None else x

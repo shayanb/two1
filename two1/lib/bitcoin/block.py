@@ -1,3 +1,6 @@
+"""This submodule provides the MerkleNode, Block, BlockHeader, and CompactBlock
+classes. It allows you to work programmatically with the individual blocks in
+the Bitcoin blockchain."""
 from sha256 import sha256 as sha256_midstate
 
 from two1.lib.bitcoin.hash import Hash
@@ -5,11 +8,14 @@ from two1.lib.bitcoin.txn import CoinbaseInput, Transaction
 from two1.lib.bitcoin.utils import bytes_to_str, pack_u32, unpack_u32, bits_to_target, pack_compact_int, unpack_compact_int
 
 
-""" merkle_hash: SHA-256 byte string (internal byte order)
-    left_child: MerkleNode object
-    right_child: MerkleNode object
-"""
 class MerkleNode:
+    """A MerkleNode object from which you can build a Merkle tree.
+
+       Args:
+           hash: SHA-256 byte string (internal byte order)
+           left_child: MerkleNode object
+           right_child: MerkleNode object
+    """
     def __init__(self, hash=None, left_child=None, right_child=None):
         self.left_child = left_child
         self.right_child = right_child
@@ -38,16 +44,16 @@ class BlockHeader(object):
     @staticmethod
     def from_bytes(b):
         """ Creates a BlockHeader object from a serialized
-            bytestream. This function "eats" the bytestream and
-            returns the remainder of the stream after deserializing
-            the fields of the BlockHeader.
+        bytestream. This function "eats" the bytestream and
+        returns the remainder of the stream after deserializing
+        the fields of the BlockHeader.
 
         Args:
             b (bytes): bytes beginning with the (4-byte) version.
 
         Returns:
-            bh, b (tuple): A tuple containing two elements: 1. A BlockHeader object
-                           and 2. the remainder of the bytestream after deserialization.
+            bh, b (tuple): A tuple containing two elements - a BlockHeader object
+            and the remainder of the bytestream after deserialization.
         """
         version, b = unpack_u32(b)
         prev_block_hash, b = Hash(b[0:32]), b[32:]
@@ -97,11 +103,11 @@ class BlockHeader(object):
             str: hex-encoded string.
         """
         return bytes_to_str(bytes(self))
-    
+
     def __bytes__(self):
         """ Serializes the BlockHeader object.
 
-        Returns: 
+        Returns:
             byte_str (bytes): The serialized byte stream.
         """
         return (
@@ -126,11 +132,11 @@ class BlockHeader(object):
 class Block(object):
     """ A Bitcoin Block object.
 
-        The merkle root is automatically computed from the transactions
-        passed in during initialization.
-    
-        Serialization and deserialization are done according to:
-        https://bitcoin.org/en/developer-reference#serialized-blocks
+    The merkle root is automatically computed from the transactions
+    passed in during initialization.
+
+    Serialization and deserialization are done according to:
+    https://bitcoin.org/en/developer-reference#serialized-blocks
 
     Args:
         height (uint): Block height
@@ -149,10 +155,10 @@ class Block(object):
 
         Args:
             b (bytes): The byte stream, starting with the block version.
-        
+
         Returns:
             block, b (tuple): A tuple. The first item is the deserialized block
-                              and the second is the remainder of the byte stream.
+            and the second is the remainder of the byte stream.
         """
         bh, b = BlockHeader.from_bytes(b)
         num_txns, b = unpack_compact_int(b)
@@ -167,13 +173,13 @@ class Block(object):
     def from_blockheader(cls, bh, txns):
         """ Creates a Block from an existing BlockHeader object and transactions.
 
-        Args: 
+        Args:
             bh (BlockHeader): A BlockHeader object.
             txns (list): List of all transactions to be included in the block.
 
         Returns:
             block (Block): A Block object.
-            
+
         """
         self = cls.__new__(cls)
         self.block_header = bh
@@ -255,8 +261,8 @@ class Block(object):
 
     def get_merkle_edge(self):
         """ This function returns the merkle edge required for mining. Specifically,
-            the edge begins with the first transaction after the coinbase (self.txns[1])
-            and continues with all nodes in the tree, one-in from the left edge.
+        the edge begins with the first transaction after the coinbase (self.txns[1])
+        and continues with all nodes in the tree, one-in from the left edge.
 
         Returns:
             edge (List(bytes)): List of hashes corresponding to the merkle edge
@@ -359,7 +365,7 @@ class CompactBlock(object):
     @property
     def coinbase_transaction(self):
         """cb_txn (Transaction): The coinbase transaction.
-           The setter takes care of recomputing the merkle edge and 
+           The setter takes care of recomputing the merkle edge and
            midstate.
         """
         return self._cb_txn

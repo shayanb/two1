@@ -1,4 +1,4 @@
-"""Allowed payment methods."""
+"""This module contains methods for making paid HTTP requests to 402-enabled servers."""
 import json
 import logging
 import requests
@@ -15,30 +15,37 @@ logger = logging.getLogger('bitserv')
 
 
 class PaymentError(Exception):
+    """Generic error for exceptions encountered during payment validation."""
     pass
 
 
 class InsufficientPaymentError(PaymentError):
+    """Raised when the amount paid is less than the payment required."""
     pass
 
 
 class InvalidPaymentParameterError(PaymentError):
+    """Raised when an incorrect or malformed payment parameter is provided."""
     pass
 
 
 class DuplicatePaymentError(PaymentError):
+    """Raised when attempting to re-use a payment token to purchase a resource."""
     pass
 
 
 class TransactionBroadcastError(PaymentError):
+    """Raised when broadcasting a transaction to the bitcoin network fails."""
     pass
 
 
 class PaymentBelowDustLimitError(PaymentError):
+    """Raised when the paid amount is less than the bitcoin network dust limit."""
     pass
 
 
 class ServerError(Exception):
+    """Raised when an error is received from a remote server on a request."""
     pass
 
 
@@ -66,12 +73,10 @@ class PaymentBase:
 
         Args:
             price: Endpoint price in satoshis
-            (**kwargs):
         Returns:
             (dict): Dict of headers that the server uses to inform the client
                 how to remit payment for the resource.
-                Example: {'address': '1MDxJYsp4q4P46RiigaGzrdyi3dsNWCTaR',
-                          'price': 500}
+                Example: {'address': '1MDxJYsp4q4P46RiigaGzrdyi3dsNWCTaR', 'price': 500}
         """
         raise NotImplementedError()
 
@@ -106,7 +111,7 @@ class OnChain(PaymentBase):
     http_payment_data = 'Bitcoin-Transaction'
     http_402_price = 'Price'
     http_402_address = 'Bitcoin-Address'
-    DUST_LIMIT = 546  # dust limit in satoshi
+    DUST_LIMIT = 3000  # dust limit in satoshi
 
     def __init__(self, wallet, db=None):
         """Initialize payment handling for on-chain payments."""
@@ -172,9 +177,9 @@ class PaymentChannel(PaymentBase):
 
     """Making a payment within a payment channel."""
 
-    http_payment_token = 'Bitcoin-Micropayment-Token'
+    http_payment_token = 'Bitcoin-Payment-Channel-Token'
     http_402_price = 'Price'
-    http_402_micro_server = 'Bitcoin-Micropayment-Server'
+    http_402_micro_server = 'Bitcoin-Payment-Channel-Server'
 
     def __init__(self, server, endpoint_path):
         """Initialize payment handling for on-chain payments."""
@@ -198,7 +203,7 @@ class PaymentChannel(PaymentBase):
             # Redeem the transaction in its payment channel
             paid_amount = self.server.redeem(txid)
             # Verify the amount of the payment against the resource price
-            return paid_amount == int(price)
+            return paid_amount >= int(price)
         except Exception as e:
             raise e
 

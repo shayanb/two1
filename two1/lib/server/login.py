@@ -1,3 +1,4 @@
+"""Handles client-side user account setup and authentication."""
 import base64
 import click
 import re
@@ -10,6 +11,7 @@ from two1.lib.util.uxstring import UxString
 
 
 class EmailAddress(click.ParamType):
+    """Represents a email address parameter."""
     name = "Email address"
 
     def __init__(self):
@@ -23,16 +25,40 @@ class EmailAddress(click.ParamType):
 
 
 class Username(click.ParamType):
+    """Represents a username parameter."""
     name = "Username"
 
     def __init__(self):
         click.ParamType.__init__(self)
 
     def convert(self, value, param, ctx):
-        if re.match(r"^[a-zA-Z][a-zA-Z_0-9]+$", value):
+        if re.match(r"^[a-zA-Z0-9][a-zA-Z_0-9]+$", value):
             if len(value) > 4 and len(value) < 32:
                 return value
         self.fail(UxString.Error.invalid_username)
+
+
+class Password(click.ParamType):
+    name = "Password"
+
+    def __init__(self):
+        click.ParamType.__init__(self)
+
+    def convert(self, value, param, ctx):
+        if len(value) < 5:
+            self.fail(UxString.short_password)
+        if not any(x.isupper() for x in value) or not any(x.islower() for x in value):
+            self.fail(UxString.capitalize_password)
+        if not any(x.isdigit() for x in value):
+            self.fail(UxString.numbers_in_password)
+
+        return value
+
+
+def get_password(username):
+    password = click.prompt(UxString.set_new_password.format(username),
+                            hide_input=True, confirmation_prompt=True, type=Password())
+    return password
 
 
 def check_setup_twentyone_account(config):
@@ -102,10 +128,11 @@ def create_username(config, username=None):
             username = click.prompt(UxString.enter_username, type=Username())
             click.echo("")
             click.echo(UxString.creating_account % username)
+            password = get_password(username)
 
         rest_client = TwentyOneRestClient(TWO1_HOST, machine_auth, username)
         try:
-            r = rest_client.account_post(bitcoin_payout_address, email)
+            r = rest_client.account_post(bitcoin_payout_address, email, password)
             click.echo(UxString.payout_address % bitcoin_payout_address)
             config.update_key("username", username)
             config.update_key("mining_auth_pubkey", machine_auth_pubkey_b64)

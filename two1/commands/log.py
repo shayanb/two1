@@ -13,7 +13,7 @@ from two1.lib.util.uxstring import UxString
               help='Include debug logs.')
 @json_output
 def log(config, debug):
-    """Shows the log of all the 21 earnings"""
+    """Shows a list of events for your Bitcoin Computer"""
     return _log(config, debug)
 
 
@@ -23,11 +23,24 @@ def _log(config, debug):
                                              config.machine_auth,
                                              config.username)
 
-    response = client.get_earning_logs()
+    prints = []
 
+    logs = get_bc_logs(client, debug)
+    prints.extend(logs)
+
+    output = "\n".join(prints)
+    config.echo_via_pager(output)
+
+    return logs
+
+
+def get_bc_logs(client, debug):
+
+    prints = []
+    response = client.get_earning_logs()
     logs = response["logs"]
 
-    prints = [UxString.log_intro]
+    prints.append(UxString.log_intro)
 
     if not debug:
         logs = filter_rollbacks(logs)
@@ -48,10 +61,7 @@ def _log(config, debug):
     if len(prints) == 1:
         prints.append(UxString.empty_logs)
 
-    output = "\n".join(prints)
-    config.echo_via_pager(output)
-
-    return logs
+    return prints
 
 
 def get_headline(entry):
@@ -78,7 +88,6 @@ def get_description(entry):
             reason = UxString.buy_message.format(buy_str[1], buy_str[0])
         else:
             reason = UxString.sell_message.format(buy_str[1], buy_str[0])
-
 
     description = "Description: {}".format(reason)
     return description
@@ -114,3 +123,4 @@ def filter_rollbacks(logs):
             result.append(entry)
 
     return result
+

@@ -21,7 +21,7 @@ class Payment:
 
     """Class to store merchant settings."""
 
-    def __init__(self, wallet, allowed_methods=None):
+    def __init__(self, wallet, allowed_methods=None, zeroconf=True, sync_period=10):
         """Configure bitserv settings.
 
         Args:
@@ -30,7 +30,7 @@ class Payment:
         from .models import PaymentChannel, PaymentChannelSpend, BlockchainTransaction
         if allowed_methods is None:
             pc_db = bitserv.DatabaseDjango(PaymentChannel, PaymentChannelSpend)
-            self.server = bitserv.PaymentServer(wallet, pc_db)
+            self.server = bitserv.PaymentServer(wallet, pc_db, zeroconf=zeroconf, sync_period=sync_period)
             self.allowed_methods = [
                 bitserv.PaymentChannel(self.server, '/payments/channel'),
                 bitserv.OnChain(wallet, bitserv.OnChainDjango(BlockchainTransaction)),
@@ -44,6 +44,7 @@ class Payment:
         payment is successfully accepted.
         """
         def decorator(fn):
+            """Validates payment and returns the original API route."""
             @wraps(fn)
             def _fn(request, *fn_args, **fn_kwargs):
                 # Calculate resource cost

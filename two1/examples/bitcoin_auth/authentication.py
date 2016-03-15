@@ -333,11 +333,11 @@ class PaymentServerAuthentication(BaseBitcoinAuthentication):
         Raises:
             PaymentRequiredException: payment is nonexistent or insufficient
         """
-        payment_header = 'HTTP_BITCOIN_MICROPAYMENT_TOKEN'
+        payment_header = 'HTTP_BITCOIN_PAYMENT_CHANNEL_TOKEN'
         # Whitelist payment channel route
-        if request._request.path in settings.DEFAULT_PAYMENT_CHANNEL_PATH:
+        if settings.DEFAULT_PAYMENT_CHANNEL_PATH in request._request.path:
             return (self.pc_user, None)
-        # Do not authenticate if no micropayment token exists
+        # Do not authenticate if no payment channel token exists
         if payment_header not in request.META:
             return None
 
@@ -346,7 +346,7 @@ class PaymentServerAuthentication(BaseBitcoinAuthentication):
             # Redeem the transaction in its payment channel
             paid_amount = payment_server.redeem(request.META[payment_header])
             # Verify the amount of the payment against the resource price
-            if paid_amount == int(get_price_for_request(request)):
+            if paid_amount >= int(get_price_for_request(request)):
                 validation = (self.pc_user, paid_amount)
         finally:
             return validation

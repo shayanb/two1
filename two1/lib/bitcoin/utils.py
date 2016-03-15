@@ -1,16 +1,12 @@
-# -*- Mode: Python -*-
-
+"""This submodule provides functions for accomplishing common tasks encountered
+in creating and parsing Bitcoin objects, like turning difficulties into targets
+or deserializing and serializing various kinds of packed byte formats."""
 import base58
 import codecs
 import hashlib
 import random
 import struct
 import os
-
-""" This module provides a number of utility/helper functions that are
-    commonly used with Bitcoin related objects. Primarily, the module
-    provides functionality for serializing and deserializing various
-    data types according to Bitcoin serialization rules.  """
 
 MAX_TARGET = 0x00000000FFFF0000000000000000000000000000000000000000000000000000
 
@@ -61,9 +57,9 @@ def hex_str_to_bytes(h):
 def render_int(n):
     """ Renders an int in the shortest possible form.
 
-        When packing the height into the coinbase script, the integer
-        representing the height must be encoded in the shortest possible
-        manner. See: https://bitcoin.org/en/developer-reference#coinbase.
+    When packing the height into the coinbase script, the integer
+    representing the height must be encoded in the shortest possible
+    manner. See: https://bitcoin.org/en/developer-reference#coinbase.
 
     Args:
         n (int): number to be encoded.
@@ -93,7 +89,7 @@ def render_int(n):
 
 def pack_compact_int(i):
     """ See
-        https://bitcoin.org/en/developer-reference#compactsize-unsigned-integers
+    https://bitcoin.org/en/developer-reference#compactsize-unsigned-integers
 
     Args:
         i (int): Integer to be serialized.
@@ -113,7 +109,7 @@ def pack_compact_int(i):
 
 def unpack_compact_int(bytestr):
     """ See
-        https://bitcoin.org/en/developer-reference#compactsize-unsigned-integers
+    https://bitcoin.org/en/developer-reference#compactsize-unsigned-integers
 
     Args:
         bytestr (bytes): bytes containing an unsigned integer to be
@@ -156,7 +152,7 @@ def unpack_u32(b):
 
     Returns:
         (i, b) (tuple): A tuple containing the deserialized integer and the
-                        remainder of the byte stream.
+        remainder of the byte stream.
     """
     u32 = struct.unpack('<I', b[0:4])
     return (u32[0], b[4:])
@@ -182,7 +178,7 @@ def unpack_u64(b):
 
     Returns:
         (i, b) (tuple): A tuple containing the deserialized integer and the
-                        remainder of the byte stream.
+        remainder of the byte stream.
     """
     u64 = struct.unpack('<Q', b[0:8])
     return (u64[0], b[8:])
@@ -196,7 +192,7 @@ def pack_var_str(s):
 
     Return:
         b (bytes): Serialized bytes, prepended with the length of the
-            byte stream.
+        byte stream.
     """
     return pack_compact_int(len(s)) + s
 
@@ -209,7 +205,7 @@ def unpack_var_str(b):
 
     Returns:
         (s, b) (tuple): A tuple containing the variable length byte stream
-                        and the remainder of the input byte stream.
+        and the remainder of the input byte stream.
     """
     strlen, b0 = unpack_compact_int(b)
     return (b0[:strlen], b0[strlen:])
@@ -217,7 +213,7 @@ def unpack_var_str(b):
 
 def bits_to_target(bits):
     """ Decodes the full target from a compact representation.
-        See: https://bitcoin.org/en/developer-reference#target-nbits
+    See: https://bitcoin.org/en/developer-reference#target-nbits
 
     Args:
         bits (int): Compact target (32 bits)
@@ -232,14 +228,14 @@ def bits_to_target(bits):
 
 def bits_to_difficulty(bits):
     """ Determines the difficulty corresponding to bits.
-        See: https://en.bitcoin.it/wiki/Difficulty
+    See: https://en.bitcoin.it/wiki/Difficulty
 
     Args:
         bits (int): Compact target (32 bits)
 
     Returns:
         diff (float): Measure of how hard it is to find a solution
-                      below the target represented by bits.
+        below the target represented by bits.
     """
     target = bits_to_target(bits)
     return MAX_TARGET / target
@@ -292,14 +288,14 @@ def difficulty_to_bits(difficulty):
 
 def address_to_key_hash(s):
     """ Given a Bitcoin address decodes the version and
-        RIPEMD-160 hash of the public key.
+    RIPEMD-160 hash of the public key.
 
     Args:
         s (bytes): The Bitcoin address to decode
 
     Returns:
         (version, h160) (tuple): A tuple containing the version and
-            RIPEMD-160 hash of the public key.
+        RIPEMD-160 hash of the public key.
     """
     n = base58.b58decode_check(s)
     version = n[0]
@@ -347,15 +343,15 @@ def hash160(b):
 
 def compute_reward(height):
     """ Computes the block reward for a block at the supplied height.
-        See: https://en.bitcoin.it/wiki/Controlled_supply for the reward
-        schedule.
+    See: https://en.bitcoin.it/wiki/Controlled_supply for the reward
+    schedule.
 
     Args:
         height (int): Block height
 
     Returns:
         reward (int): Number of satoshis rewarded for solving a block at the
-                      given height.
+        given height.
     """
     base_subsidy = 50 * 100000000
     era = height // 210000

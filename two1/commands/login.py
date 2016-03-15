@@ -1,33 +1,89 @@
+# standard python imports
 import base64
-import click
 import sys
-from two1.lib.server.login import check_setup_twentyone_account
 
+# 3rd party imports
+import click
+
+# two1 imports
+from two1.lib.server.login import check_setup_twentyone_account
 from two1.lib.blockchain.exceptions import DataProviderUnavailableError, DataProviderError
 from two1.lib.util.exceptions import TwoOneError, UnloggedException
 from two1.lib.util.uxstring import UxString
 from two1.lib.wallet import Two1Wallet
 from two1.lib.blockchain import TwentyOneProvider
-from two1.lib.util.decorators import json_output
+from two1.lib.util.decorators import json_output, check_notifications
 from two1.lib.server.analytics import capture_usage
 from two1.lib.server import rest_client
 from two1.commands.config import TWO1_HOST, TWO1_PROVIDER_HOST, Config
 from two1.lib.wallet.two1_wallet import Wallet
 from two1.lib.server.machine_auth_wallet import MachineAuthWallet
-import two1.lib.server.login as server_login
+from two1.lib.server.login import get_password
 
 
 @click.command()
+@click.option('-u', '--user', default=None, help='The user to log in with.')
+@click.option('-sp', '--setpassword', is_flag=True, default=False,
+              help='Set/update your 21 password')
 @json_output
-def login(config):
-    """login into your different 21 accounts"""
-    return _login(config)
+def login(config, user, setpassword):
+    """Log in to your different 21 accounts."""
+    if setpassword:
+        return _set_password(config, user)
+    else:
+        return _login(config, user)
 
 
 @capture_usage
-def _login(config):
+def _set_password(config, user):
+    try:
+        if not hasattr(config, "username"):
+            click.secho(UxString.no_account_found)
+            return
+
+        password = get_password(config.username)
+        machine_auth = get_machine_auth(config)
+        client = rest_client.TwentyOneRestClient(TWO1_HOST,
+                                                 machine_auth,
+                                                 config.username)
+        client.update_password(password)
+
+    except click.exceptions.Abort:
+        pass
+
+
+def get_machine_auth(config):
+    if hasattr(config, "machine_auth"):
+        machine_auth = config.machine_auth
+    else:
+        dp = TwentyOneProvider(TWO1_PROVIDER_HOST)
+        wallet_path = Two1Wallet.DEFAULT_WALLET_PATH
+        if not Two1Wallet.check_wallet_file(wallet_path):
+            create_wallet_and_account()
+            return
+
+        wallet = Wallet(wallet_path=wallet_path,
+                        data_provider=dp)
+        machine_auth = MachineAuthWallet(wallet)
+
+    return machine_auth
+
+
+@check_notifications
+@capture_usage
+def _login(config, user):
+    """ Logs into a two1 user account
+
+        Using the rest api and wallet machine auth, _login
+        will log into your account and set your authentication credientails
+        for all further api calls.
+
+    Args:
+        config (Config): config object used for getting .two1 information
+        user (str): username
+    """
     if config.username:
-        click.secho("currently logged in as: {}".format(config.username), fg="blue")
+        click.secho("Currently logged in as: {}".format(config.username), fg="blue")
 
     # get machine auth
     if hasattr(config, "machine_auth"):
@@ -53,28 +109,40 @@ def _login(config):
         create_wallet_and_account()
         return
 
-
     else:
-        # interactively select the username
-        counter = 1
-        click.secho(UxString.registered_usernames_title)
-        for user in usernames:
-            click.secho("{}- {}".format(counter, user))
-            counter += 1
+        if user is None:
+            # interactively select the username
+            counter = 1
+            click.secho(UxString.registered_usernames_title)
 
-        username_index = -1
-        while username_index <= 0 or username_index > len(usernames):
-            username_index = click.prompt(UxString.login_prompt, type=int)
-            if username_index <= 0 or username_index > len(usernames):
-                click.secho(UxString.login_prompt_invalid_user.format(1, len(usernames)))
+            for user in usernames:
+                click.secho("{}- {}".format(counter, user))
+                counter += 1
 
-        username = usernames[username_index - 1]
+            username_index = -1
+            while username_index <= 0 or username_index > len(usernames):
+                username_index = click.prompt(UxString.login_prompt, type=int)
+                if username_index <= 0 or username_index > len(usernames):
+                    click.secho(UxString.login_prompt_invalid_user.format(1, len(usernames)))
+
+            username = usernames[username_index - 1]
+        else:
+            # log in with provided username
+            if user in usernames:
+                username = user
+            else:
+                click.secho(UxString.login_prompt_user_does_not_exist.format(user))
+                return
 
         # save the selection in the config file
         save_config(config, machine_auth, username)
 
 
 def save_config(config, machine_auth, username):
+    """
+    Todo:
+        Merge this function into _login
+    """
     machine_auth_pubkey_b64 = base64.b64encode(
         machine_auth.public_key.compressed_bytes
     ).decode()
@@ -87,6 +155,11 @@ def save_config(config, machine_auth, username):
 
 
 def create_wallet_and_account():
+    """ Creates a wallet and two1 account
+
+    Raises:
+        TwoOneError: if the data provider is unavailable or an error occurs
+    """
     try:
         cfg = Config()
         check_setup_twentyone_account(cfg)

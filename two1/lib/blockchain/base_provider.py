@@ -1,3 +1,7 @@
+"""This submodule provides an abstract base class for a Provider, which
+provides information about the blockchain and broadcasts transactions by
+contacting a server. It is possible to put this "server" on the same local
+machine if desired or to keep it remote to save space."""
 
 
 class BaseProvider(object):
@@ -11,10 +15,10 @@ class BaseProvider(object):
     def get_balance(self, address_list):
         """ Provides the balance for each address.
 
-            The balance is computed by looking up the transactions associated
-            with each address in address_list, summing all received coins and
-            subtracting all coins payed out. It makes a distinction between
-            confirmed and unconfirmed transactions.
+        The balance is computed by looking up the transactions associated
+        with each address in address_list, summing all received coins and
+        subtracting all coins payed out. It makes a distinction between
+        confirmed and unconfirmed transactions.
 
         Args:
             address_list (list(str)): List of Base58Check encoded
@@ -53,7 +57,7 @@ class BaseProvider(object):
 
     def get_utxos(self, address_list):
         """ Provides all unspent transactions associated with each
-            address in address_list.
+        address in address_list.
 
         Args:
             address_list (list(str)): List of Base58Check encoded
