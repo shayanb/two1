@@ -1,19 +1,21 @@
+""" Two1 command to join various zerotier networks """
 # standard python imports
-import platform
 import subprocess
+import logging
 
 # 3rd party imports
 import click
+from tabulate import tabulate
 
 # two1 imports
-from tabulate import tabulate
-from two1.lib.server import rest_client
-from two1.commands.config import TWO1_HOST
-from two1.lib.server.analytics import capture_usage
-from two1.lib.server.rest_client import ServerRequestError
-from two1.lib.util.decorators import check_notifications
-from two1.lib.util.uxstring import UxString
-from two1.lib.util import zerotier
+from two1.commands.util import decorators
+from two1.commands.util import uxstring
+from two1.commands.util import zerotier
+from two1.commands.util import exceptions
+
+
+# Creates a ClickLogger
+logger = logging.getLogger(__name__)
 
 
 @click.command()
@@ -21,6 +23,9 @@ from two1.lib.util import zerotier
 @click.option('--status', is_flag=True, default=False,
               help='Show the status of all the networks that you have joined.')
 @click.pass_context
+@decorators.catch_all
+@decorators.capture_usage
+@decorators.check_notifications
 def join(ctx, network, status):
     """Join a p2p network to buy/sell for BTC.
 
@@ -35,24 +40,17 @@ $ 21 join --status
 
 Shows the status of all the networks that you have joined
 """
-    config = ctx.obj['config']
     if status:
-        show_network_status(config)
+        show_network_status()
     else:
-        _join(config, network)
+        _join(ctx.obj['client'], network)
 
 
-@check_notifications
-@capture_usage
-def show_network_status(config):
-    """ Prints the network status of the zerotier networks
-
-    Args:
-        config (Config): config object used for getting .two1 information
-    """
+def show_network_status():
+    """ Prints the network status of the zerotier networks """
     networks_info = zerotier.get_all_addresses()
     if len(networks_info) == 0:
-        click.secho(UxString.no_network)
+        logger.info(uxstring.UxString.no_network)
         return
 
     headers = ["Network Name", "Your IP"]
@@ -60,46 +58,39 @@ def show_network_status(config):
     for name, ip in networks_info.items():
         rows.append([name, ip])
 
-    click.echo(tabulate(rows, headers, tablefmt="grid"))
+    logger.info(tabulate(rows, headers, tablefmt="grid"))
 
 
-@check_notifications
-@capture_usage
-def _join(config, network):
+def _join(client, network):
     """ Joins the given zerotier network
 
     Args:
-        config (Config): config object used for getting .two1 information
+        client (two1.server.rest_client.TwentyOneRestClient) an object for
+            sending authenticated requests to the TwentyOne backend.
         network (str): the name of the network being joined. Defaults to 21market
 
     Raises:
         ServerRequestError: if server returns an error code other than 401
     """
-    client = rest_client.TwentyOneRestClient(TWO1_HOST,
-                                             config.machine_auth,
-                                             config.username)
-
     try:
-        config.log(UxString.update_superuser)
-        user_platform = platform.system()
-        if user_platform != "Darwin":
-            start_zerotier_command = [
-                "sudo", "service", "zerotier-one", "start"
-            ]
-            subprocess.check_output(start_zerotier_command)
+        logger.info(uxstring.UxString.update_superuser)
+
+        if zerotier.is_installed():
+            # ensures the zerotier daemon is running
+            zerotier.start_daemon()
+        else:
+            logger.info(uxstring.UxString.install_zerotier)
+
         zt_device_address = zerotier.device_address()
         response = client.join(network, zt_device_address)
         if response.ok:
-            join_command = [
-                "sudo", "zerotier-cli", "join",
-                response.json().get("networkid")
-            ]
-            subprocess.check_output(join_command)
-            config.log(UxString.successful_join.format(click.style(network, fg="magenta")))
-    except ServerRequestError as e:
-        if e.status_code == 401:
-            config.log(UxString.invalid_network)
+            network_id = response.json().get("networkid")
+            zerotier.join_network(network_id)
+            logger.info(uxstring.UxString.successful_join.format(click.style(network, fg="magenta")))
+    except exceptions.ServerRequestError as e:
+        if e.status_code == 400:
+            logger.info(uxstring.UxString.invalid_network)
         else:
             raise e
     except subprocess.CalledProcessError as e:
-        config.log(str(e))
+        logger.info(str(e))

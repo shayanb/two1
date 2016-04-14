@@ -1,47 +1,53 @@
+""" Two1 command module for getting and displaying messages in your inbox """
 # standard python imports
 from datetime import datetime
+import logging
 
 # 3rd party imports
 import click
 
 # two1 imports
-from two1.lib.server import rest_client
-from two1.commands.config import TWO1_HOST
-from two1.lib.server.analytics import capture_usage
-from two1.lib.util.decorators import json_output
-from two1.lib.util.uxstring import UxString
+from two1.commands.util import decorators
+from two1.commands.util import uxstring
+
+
+# Creates a ClickLogger
+logger = logging.getLogger(__name__)
 
 
 @click.command()
-@json_output
-def inbox(config):
+@decorators.catch_all
+@decorators.json_output
+@decorators.capture_usage
+def inbox(ctx):
     """ Shows a list of notifications for your account """
-    return _inbox(config)
+    return _inbox(ctx.obj['config'], ctx.obj['client'])
 
 
-@capture_usage
-def _inbox(config):
+def _inbox(config, client):
     """ Shows a list of notifications on a click pager
 
     Args:
         config (Config): config object used for getting .two1 information
+        client (two1.server.rest_client.TwentyOneRestClient) an object for
+            sending authenticated requests to the TwentyOne backend.
 
     Returns:
         list: list of notifications in users inbox
     """
-    client = rest_client.TwentyOneRestClient(TWO1_HOST,
-                                             config.machine_auth,
-                                             config.username)
-
     prints = []
 
     notifications, has_unreads = get_notifications(config, client)
+    if not notifications:
+        logger.info("Inbox empty")
+        return notifications
+
     if len(notifications) > 0:
-        prints.append(UxString.notification_intro)
+        prints.append(uxstring.UxString.notification_intro)
         prints.extend(notifications)
 
     output = "\n".join(prints)
-    config.echo_via_pager(output)
+    logger.info(output, pager=True)
 
     if has_unreads:
         client.mark_notifications_read(config.username)

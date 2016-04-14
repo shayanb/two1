@@ -1,0 +1,10 @@
+#!/usr/bin/python3
+# EASY-INSTALL-ENTRY-SCRIPT: 'two1==2.3.5','console_scripts','walletd'
+__requires__ = 'two1==2.3.5'
+import sys
+from pkg_resources import load_entry_point
+
+if __name__ == '__main__':
+    sys.exit(
+        load_entry_point('two1==2.3.5', 'console_scripts', 'walletd')()
+    )

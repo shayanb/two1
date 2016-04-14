@@ -1,171 +1,286 @@
+""" Logs a user into their 21.co account """
 # standard python imports
 import base64
-import sys
+import re
+import logging
 
 # 3rd party imports
 import click
 
 # two1 imports
-from two1.lib.server.login import check_setup_twentyone_account
-from two1.lib.blockchain.exceptions import DataProviderUnavailableError, DataProviderError
-from two1.lib.util.exceptions import TwoOneError, UnloggedException
-from two1.lib.util.uxstring import UxString
-from two1.lib.wallet import Two1Wallet
-from two1.lib.blockchain import TwentyOneProvider
-from two1.lib.util.decorators import json_output, check_notifications
-from two1.lib.server.analytics import capture_usage
-from two1.lib.server import rest_client
-from two1.commands.config import TWO1_HOST, TWO1_PROVIDER_HOST, Config
-from two1.lib.wallet.two1_wallet import Wallet
-from two1.lib.server.machine_auth_wallet import MachineAuthWallet
-from two1.lib.server.login import get_password
+import two1
+from two1.commands.util import exceptions
+from two1.commands.util import uxstring
+from two1.commands.util import decorators
+from two1.commands.util import wallet as wallet_util
+from two1.server import rest_client as _rest_client
+from two1.server import machine_auth_wallet
+
+
+# Creates a ClickLogger
+logger = logging.getLogger(__name__)
 
 
 @click.command()
-@click.option('-u', '--user', default=None, help='The user to log in with.')
 @click.option('-sp', '--setpassword', is_flag=True, default=False,
               help='Set/update your 21 password')
-@json_output
-def login(config, user, setpassword):
-    """Log in to your different 21 accounts."""
+@click.option('-u', '--username', default=None, help='The username to login with')
+@click.option('-p', '--password', default=None, help='The password to login with')
+@decorators.catch_all
+@decorators.json_output
+@decorators.capture_usage
+def login(ctx, setpassword, username, password):
+    """Log in to your 21 account.
+
+\b
+Usage
+_____
+Use an interactive login prompt to log in to your 21 account.
+$ 21 login
+
+\b
+Log in without the login prompt.
+$ 21 login -u your_username -p your_password
+
+\b
+Change the password for the currently logged in user.
+$ 21 login -sp
+
+    """
+    config = ctx.obj['config']
+
+    # A user needs to have a machine auth wallet in order to login to anything
+    wallet = wallet_util.get_or_create_wallet(config.wallet_path)
+    machine_auth = machine_auth_wallet.MachineAuthWallet(wallet)
+
     if setpassword:
-        return _set_password(config, user)
+        return set_password(config, machine_auth)
     else:
-        return _login(config, user)
+        return login_account(config, machine_auth, username, password)
 
 
-@capture_usage
-def _set_password(config, user):
+def login_account(config, machine_auth, username=None, password=None):
+    """ Log in a user into the two1 account
+
+    Args:
+        config (Config): config object used for getting .two1 information
+        username (str): optional command line arg to skip username prompt
+        password (str): optional command line are to skip password prompt
+    """
+    # prints the sign up page link
+    logger.info(uxstring.UxString.signin_title)
+
+    # uses specifies username or asks for a different one
+    username = username or get_username_interactive()
+    password = password or get_password_interactive()
+
+    # use existing username in config
+    rest_client = _rest_client.TwentyOneRestClient(two1.TWO1_HOST, machine_auth, username)
+
+    # get the payout address and the pubkey from the machine auth wallet
+    machine_auth_pubkey_b64 = base64.b64encode(machine_auth.public_key.compressed_bytes).decode()
+    payout_address = machine_auth.wallet.current_address
+
+    logger.info(uxstring.UxString.login_in_progress.format(username))
     try:
-        if not hasattr(config, "username"):
-            click.secho(UxString.no_account_found)
-            return
+        _ = rest_client.login(payout_address=payout_address, password=password)
+    # handles 401 gracefully
+    except exceptions.ServerRequestError as ex:
+        if ex.status_code == 403 and "error" in ex.data and ex.data["error"] == "TO408":
+            email = ex.data["email"]
+            raise exceptions.UnloggedException(
+                click.style(uxstring.UxString.unconfirmed_email.format(email),
+                            fg="blue"))
+        elif ex.status_code == 403:
+            raise exceptions.UnloggedException(uxstring.UxString.incorrect_password)
+        else:
+            raise ex
 
-        password = get_password(config.username)
-        machine_auth = get_machine_auth(config)
-        client = rest_client.TwentyOneRestClient(TWO1_HOST,
-                                                 machine_auth,
-                                                 config.username)
-        client.update_password(password)
+    logger.info(uxstring.UxString.payout_address.format(payout_address))
 
+    # Save the new username and auth key
+    config.set("username", username)
+    config.set("mining_auth_pubkey", machine_auth_pubkey_b64)
+    config.save()
+
+    # Ask for opt-in to analytics
+    analytics_optin(config)
+
+
+def create_account_on_bc(config, machine_auth):
+    """ Creates an account for the current machine auth wallet
+
+    Args:
+        config (Config): config object used for getting .two1 information
+        machine_auth (MachineAuthWallet): machine auth wallet used for authentication
+    """
+    # get the payout address and the pubkey from the machine auth wallet
+    machine_auth_pubkey_b64 = base64.b64encode(machine_auth.public_key.compressed_bytes).decode()
+    payout_address = machine_auth.wallet.current_address
+
+    logger.info(uxstring.UxString.missing_account)
+    email = None
+    username = None
+    while True:
+        if not email:
+            email = click.prompt(uxstring.UxString.enter_email, type=EmailAddress())
+
+        # prompts for a username and password
+        if not username:
+            try:
+                logger.info("")
+                username = click.prompt(uxstring.UxString.enter_username, type=Username())
+                logger.info("")
+                logger.info(uxstring.UxString.creating_account.format(username))
+                password = click.prompt(uxstring.UxString.set_new_password.format(username),
+                                        hide_input=True, confirmation_prompt=True, type=Password())
+            except click.Abort:
+                return
+
+        try:
+            # change the username of the given username
+            rest_client = _rest_client.TwentyOneRestClient(two1.TWO1_HOST, machine_auth, username)
+            rest_client.account_post(payout_address, email, password)
+
+        # Do not continue creating an account because the UUID is invalid
+        except exceptions.BitcoinComputerNeededError:
+            raise
+
+        except exceptions.ServerRequestError as ex:
+            # handle various 400 errors from the server
+            if ex.status_code == 400:
+                if "error" in ex.data:
+                    error_code = ex.data["error"]
+                    # email exists
+                    if error_code == "TO401":
+                        logger.info(uxstring.UxString.email_exists.format(email))
+                        email = None
+                        continue
+                    # username exists
+                    elif error_code == "TO402":
+                        logger.info(uxstring.UxString.username_exists.format(username))
+                        username = None
+                        continue
+                # unexpected 400 error
+                else:
+                    raise exceptions.Two1Error(
+                        str(next(iter(ex.data.values()), "")) + "({})".format(ex.status_code))
+
+            # handle an invalid username format
+            elif ex.status_code == 404:
+                logger.info(uxstring.UxString.Error.invalid_username)
+            # handle an error where a bitcoin computer is necessary
+            elif ex.status_code == 403:
+                r = ex.data
+                if "detail" in r and "TO200" in r["detail"]:
+                    raise exceptions.UnloggedException(uxstring.UxString.max_accounts_reached)
+            else:
+                logger.info(uxstring.UxString.Error.account_failed)
+            username = None
+
+        # created account successfully
+        else:
+            logger.info(uxstring.UxString.payout_address.format(payout_address))
+
+            # save new username and password
+            config.set("username", username)
+            config.set("mining_auth_pubkey", machine_auth_pubkey_b64)
+            config.save()
+
+            # Ask for opt-in to analytics
+            analytics_optin(config)
+
+            break
+
+
+def analytics_optin(config):
+    """ Set the collect_analytics flag to enable analytics collection.
+    Args:
+        config: Config object from the cli context.
+    """
+    if click.confirm(uxstring.UxString.analytics_optin):
+        config.set("collect_analytics", True, should_save=True)
+        logger.info(uxstring.UxString.analytics_thankyou)
+    else:
+        logger.info("")
+
+
+def get_username_interactive():
+    """ Prompts the user for a username using click.prompt """
+    username = click.prompt(uxstring.UxString.login_username, type=str)
+    return username
+
+
+def get_password_interactive():
+    """ Prompts the user for a password using click.prompt """
+    password = click.prompt(uxstring.UxString.login_password, hide_input=True, type=str)
+    return password
+
+
+def set_password(config, machine_auth):
+    """ Upadets the 21 user account password from command line
+
+    Args:
+        config (Config): config object used for getting .two1 information
+        client (two1.server.rest_client.TwentyOneRestClient) an object for
+            sending authenticated requests to the TwentyOne backend.
+    """
+    if not config.username:
+        logger.info(uxstring.UxString.login_required)
+        return
+
+    # use existing username in config
+    rest_client = _rest_client.TwentyOneRestClient(two1.TWO1_HOST, machine_auth, config.username)
+
+    try:
+        password = click.prompt(uxstring.UxString.set_new_password.format(config.username),
+                                hide_input=True, confirmation_prompt=True, type=Password())
+        rest_client.update_password(password)
     except click.exceptions.Abort:
         pass
 
 
-def get_machine_auth(config):
-    if hasattr(config, "machine_auth"):
-        machine_auth = config.machine_auth
-    else:
-        dp = TwentyOneProvider(TWO1_PROVIDER_HOST)
-        wallet_path = Two1Wallet.DEFAULT_WALLET_PATH
-        if not Two1Wallet.check_wallet_file(wallet_path):
-            create_wallet_and_account()
-            return
+class Password(click.ParamType):
+    """ Param validator class for prompting user for password """
+    name = "Password"
 
-        wallet = Wallet(wallet_path=wallet_path,
-                        data_provider=dp)
-        machine_auth = MachineAuthWallet(wallet)
+    def __init__(self):
+        click.ParamType.__init__(self)
 
-    return machine_auth
+    def convert(self, value, param, ctx):
+        if len(value) < 5:
+            self.fail(uxstring.UxString.short_password)
+        if not any(x.isupper() for x in value) or not any(x.islower() for x in value):
+            self.fail(uxstring.UxString.capitalize_password)
+        if not any(x.isdigit() for x in value):
+            self.fail(uxstring.UxString.numbers_in_password)
 
-
-@check_notifications
-@capture_usage
-def _login(config, user):
-    """ Logs into a two1 user account
-
-        Using the rest api and wallet machine auth, _login
-        will log into your account and set your authentication credientails
-        for all further api calls.
-
-    Args:
-        config (Config): config object used for getting .two1 information
-        user (str): username
-    """
-    if config.username:
-        click.secho("Currently logged in as: {}".format(config.username), fg="blue")
-
-    # get machine auth
-    if hasattr(config, "machine_auth"):
-        machine_auth = config.machine_auth
-    else:
-        dp = TwentyOneProvider(TWO1_PROVIDER_HOST)
-        wallet_path = Two1Wallet.DEFAULT_WALLET_PATH
-        if not Two1Wallet.check_wallet_file(wallet_path):
-            create_wallet_and_account()
-            return
-
-        wallet = Wallet(wallet_path=wallet_path,
-                        data_provider=dp)
-        machine_auth = MachineAuthWallet(wallet)
-
-    client = rest_client.TwentyOneRestClient(TWO1_HOST,
-                                             machine_auth)
-
-    # get a list of all usernames for device_id/wallet_pk pair
-    res = client.account_info()
-    usernames = res.json()["usernames"]
-    if len(usernames) == 0:
-        create_wallet_and_account()
-        return
-
-    else:
-        if user is None:
-            # interactively select the username
-            counter = 1
-            click.secho(UxString.registered_usernames_title)
-
-            for user in usernames:
-                click.secho("{}- {}".format(counter, user))
-                counter += 1
-
-            username_index = -1
-            while username_index <= 0 or username_index > len(usernames):
-                username_index = click.prompt(UxString.login_prompt, type=int)
-                if username_index <= 0 or username_index > len(usernames):
-                    click.secho(UxString.login_prompt_invalid_user.format(1, len(usernames)))
-
-            username = usernames[username_index - 1]
-        else:
-            # log in with provided username
-            if user in usernames:
-                username = user
-            else:
-                click.secho(UxString.login_prompt_user_does_not_exist.format(user))
-                return
-
-        # save the selection in the config file
-        save_config(config, machine_auth, username)
+        return value
 
 
-def save_config(config, machine_auth, username):
-    """
-    Todo:
-        Merge this function into _login
-    """
-    machine_auth_pubkey_b64 = base64.b64encode(
-        machine_auth.public_key.compressed_bytes
-    ).decode()
+class EmailAddress(click.ParamType):
+    """ Param validator class for prompting user for email address"""
+    name = "Email address"
 
-    click.secho("Logging in {}".format(username), fg="yellow")
-    config.load()
-    config.update_key("username", username)
-    config.update_key("mining_auth_pubkey", machine_auth_pubkey_b64)
-    config.save()
+    def __init__(self):
+        click.ParamType.__init__(self)
+
+    def convert(self, value, param, ctx):
+        if re.match(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$",
+                    value):
+            return value
+        self.fail(uxstring.UxString.Error.invalid_email)
 
 
-def create_wallet_and_account():
-    """ Creates a wallet and two1 account
+class Username(click.ParamType):
+    """ Param validator class for prompting user for username """
+    name = "Username"
 
-    Raises:
-        TwoOneError: if the data provider is unavailable or an error occurs
-    """
-    try:
-        cfg = Config()
-        check_setup_twentyone_account(cfg)
-    except DataProviderUnavailableError:
-        raise TwoOneError(UxString.Error.connection_cli)
-    except DataProviderError:
-        raise TwoOneError(UxString.Error.server_err)
-    except UnloggedException:
-        sys.exit(1)
+    def __init__(self):
+        click.ParamType.__init__(self)
+
+    def convert(self, value, param, ctx):
+        if re.match(r"^[a-zA-Z0-9][a-zA-Z_0-9]+$", value):
+            if len(value) > 4 and len(value) < 32:
+                return value
+        self.fail(uxstring.UxString.Error.invalid_username)

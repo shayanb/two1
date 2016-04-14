@@ -1,25 +1,30 @@
+""" Two1 command to search the 21 Marketplace """
 # standard python imports
 import datetime
 from textwrap import wrap
+import logging
 
 # 3rd party imports
 import click
 from tabulate import tabulate
 
 # two1 imports
-from two1.commands.config import TWO1_HOST
-from two1.lib.server.analytics import capture_usage
-from two1.lib.server.rest_client import ServerRequestError
-from two1.lib.util.decorators import json_output
-from two1.lib.util.uxstring import UxString
-from two1.lib.server import rest_client
+from two1.commands.util import exceptions
+from two1.commands.util import decorators
+from two1.commands.util import uxstring
+
+
+# Creates a ClickLogger
+logger = logging.getLogger(__name__)
 
 
 @click.command("search")
 @click.pass_context
 @click.argument('search_string', required=False)
-@json_output
-def search(config, search_string=None):
+@decorators.catch_all
+@decorators.json_output
+@decorators.capture_usage
+def search(ctx, search_string=None):
     """Search for apps listed on the 21 Marketplace.
 
 \b
@@ -41,25 +46,26 @@ Use 'n' to move to the next page and 'p' to move to the previous page.
 You can also enter an app id to view detailed information about the app.
 
     """
-    _search(config, search_string)
+    _search(ctx.obj['client'], search_string)
 
 
-@capture_usage
-def _search(config, search_string):
+def _search(client, search_string):
     """ Searches the marketplace for apps by the given search_string
 
         Apps are then displayed in a pager in which the user can get more
         info on a selected app.
 
+        config (Config): Config object used for user specific information
+        client (two1.server.rest_client.TwentyOneRestClient) an object for
+            sending authenticated requests to the TwentyOne backend.
+        wallet (two1.wallet.Wallet): a user's wallet instance
+
     Args:
         config (Config): config object used for getting .two1 information
         search_string (str): string used to search for apps
     """
-    client = rest_client.TwentyOneRestClient(TWO1_HOST,
-                                             config.machine_auth,
-                                             config.username)
     if search_string is None:
-        click.secho(UxString.list_all, fg="green")
+        logger.info(uxstring.UxString.list_all, fg="green")
 
     current_page = 0
     total_pages = get_search_results(client, search_string, current_page)
@@ -68,15 +74,15 @@ def _search(config, search_string):
 
     while 0 <= current_page < total_pages:
         try:
-            prompt_resp = click.prompt(UxString.pagination,
+            prompt_resp = click.prompt(uxstring.UxString.pagination,
                                        type=str)
             next_page = get_next_page(prompt_resp, current_page)
             if next_page == -1:
                 model_id = prompt_resp
-                display_search_info(config, client, model_id)
+                display_search_info(client, model_id)
             elif next_page >= total_pages or next_page < 0:
                 continue
-            else:
+            elif next_page != current_page:
                 get_search_results(client, search_string, next_page)
                 current_page = next_page
 
@@ -84,7 +90,7 @@ def _search(config, search_string):
             return
 
 
-def get_search_results(rest_client, search_string, page):
+def get_search_results(client, search_string, page):
     """ Uses the rest client to get search results in a paginated format
 
     Args:
@@ -94,49 +100,44 @@ def get_search_results(rest_client, search_string, page):
     Returns:
         int: the total number of pages returned by the server
     """
-    resp = rest_client.search(search_string, page)
-    if resp.ok:
-        resp_json = resp.json()
-        search_results = resp_json["results"]
-        if search_results is None or len(search_results) == 0:
-            if search_string:
-                click.secho(UxString.empty_listing.format(search_string))
-            else:
-                click.secho(UxString.no_app_in_marketplace)
+    resp = client.search(search_string, page)
+    resp_json = resp.json()
+    search_results = resp_json["results"]
+    if search_results is None or len(search_results) == 0:
+        if search_string:
+            logger.info(uxstring.UxString.empty_listing.format(search_string))
+        else:
+            logger.info(uxstring.UxString.no_app_in_marketplace)
 
-            return 0
+        return 0
 
-        total_pages = resp_json["total_pages"]
-        click.secho("\nPage {}/{}".format(page + 1, total_pages), fg="green")
-        content = market_search_formatter(search_results, page)
-        click.echo(content)
-        return total_pages
-    else:
-        raise ServerRequestError()
+    total_pages = resp_json["total_pages"]
+    logger.info("\nPage {}/{}".format(page + 1, total_pages), fg="green")
+    content = market_search_formatter(search_results)
+    logger.info(content)
+    return total_pages
 
 
 MAX_PAGE_SIZE = 10
 
 
-def market_search_formatter(search_results, current_page):
+def market_search_formatter(search_results):
     """ Formats the search results into a tabular paginated format
 
     Args:
         search_results (list): a list of results in dict format returned from the REST API
-        current_page (int): current page used to go to next or previous pages
 
     Returs:
         str: formatted results in tabular format
     """
     headers = ["id", "Details", "Creator", "Price", "Category", "Rating"]
     rows = []
-    for i, item in enumerate(search_results):
-        id = item["id"]
+    for _, item in enumerate(search_results):
         if item["min_price"] != item["max_price"]:
             price_range = click.style("Variable", fg="blue")
         else:
             price_range = click.style("{} Satoshis".format(item["min_price"]),
-                                                           fg="blue")
+                                      fg="blue")
         category = click.style("{}".format(item["category"]), fg="blue")
         creator = click.style("{}".format(item["username"]), fg="blue")
         title = click.style(item["title"], fg="blue")
@@ -147,8 +148,8 @@ def market_search_formatter(search_results, current_page):
                 rating += "s"
             rating += ")"
         rating = click.style(rating, fg="blue")
-        rows.append([id, title, creator, price_range, category, rating])
-        for indx, l in enumerate(wrap(item["description"])):
+        rows.append([item["id"], title, creator, price_range, category, rating])
+        for _, l in enumerate(wrap(item["description"])):
             rows.append(["", l, "", "", "", ""])
         rows.append(["", "", "", "", "", ""])
 
@@ -169,18 +170,17 @@ def get_next_page(prompt_response, current_page):
     if prompt_response.lower() in ["n", "next", "f", "forward"]:
         return current_page + 1
     elif prompt_response.lower() in ["p", "previous", 'b', "back"]:
-        return current_page - 1
+        return max(current_page - 1, 0)
     elif prompt_response.lower() in ["q", "cancel", "c"]:
         raise click.exceptions.Abort()
     else:
         return -1
 
 
-def display_search_info(config, client, listing_id):
+def display_search_info(client, listing_id):
     """ Given a listing id, format and print detailed information to the command line
 
     Args:
-        config (Config): config object used for getting .two1 information
         client (TwentyOneRestClient): rest client used for communication with the backend api
         listing_id (str): unique marketplace listing id
 
@@ -189,9 +189,9 @@ def display_search_info(config, client, listing_id):
     """
     try:
         resp = client.get_listing_info(listing_id)
-    except ServerRequestError as e:
+    except exceptions.ServerRequestError as e:
         if e.status_code == 404:
-            click.secho(UxString.app_does_not_exist.format(listing_id))
+            logger.info(uxstring.UxString.app_does_not_exist.format(listing_id))
             return
         else:
             raise e
@@ -256,4 +256,4 @@ def display_search_info(config, client, listing_id):
 
     final_str = "\n".join(pager_components)
 
-    config.echo_via_pager(final_str)
+    logger.info(final_str, pager=True)

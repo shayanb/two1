@@ -1,61 +1,54 @@
+""" Flushes current off-chain balance to the blockchain """
+# standard python imports
+import logging
+
 # 3rd party importss
 import click
 
 # two1 imports
-from two1.lib.server import rest_client
-from two1.commands.config import TWO1_HOST
-from two1.lib.server.analytics import capture_usage
-from two1.lib.server.rest_client import ServerRequestError
-from two1.lib.util.decorators import check_notifications
-from two1.lib.util.uxstring import UxString
+from two1.commands.util import decorators
+from two1.commands.util import uxstring
+from two1.commands.util import exceptions
+
+# Creates a ClickLogger
+logger = logging.getLogger(__name__)
 
 
 @click.command()
 @click.pass_context
-def flush(ctx):
+@decorators.catch_all
+@decorators.check_notifications
+@decorators.capture_usage
+@click.option('-a', '--amount', default=None, type=click.INT,
+              help="The amount to be flush out of your account.")
+def flush(ctx, amount):
     """ Flush your 21.co buffer to the blockchain."""
-    config = ctx.obj['config']
-    _flush(config)
+    _flush(ctx.obj['client'], ctx.obj['wallet'], amount)
 
 
-@check_notifications
-@capture_usage
-def _flush(config):
-    """
-    Todo:
-        Why keep this function? Just put the logic in flush()
-    """
-    client = rest_client.TwentyOneRestClient(TWO1_HOST,
-                                             config.machine_auth,
-                                             config.username)
-
-    flush_earnings(config, client)
-
-    config.log("")
-
-
-def flush_earnings(config, client):
+def _flush(client, wallet, amount=None):
     """ Flushes current off-chain balance to the blockchain
 
     Args:
-        config (Config): config object used for getting .two1 information
-        client (TwentyOneRestClient): rest client used for communication with the backend api
+        client (two1.server.rest_client.TwentyOneRestClient) an object for
+            sending authenticated requests to the TwentyOne backend.
+        wallet (two1.wallet.Wallet): a user's wallet instance
+        amount (int): The amount to be flushed. Should be more than 10k
 
     Raises:
         ServerRequestError: if server returns an error code other than 401
     """
 
     try:
-        response = client.flush_earnings()
+        response = client.flush_earnings(amount=amount)
         if response.ok:
-            success_msg = UxString.flush_success.format(
+            success_msg = uxstring.UxString.flush_success.format(
                 click.style("Flush to Blockchain", fg='magenta'),
-                config.wallet.current_address,
+                wallet.current_address,
                 click.style("21 mine", bold=True))
-            config.log(success_msg, nl=False)
-    except ServerRequestError as e:
-        if e.status_code == 401:
-            click.echo(UxString.flush_insufficient_earnings)
+            logger.info(success_msg)
+    except exceptions.ServerRequestError as ex:
+        if ex.status_code == 401:
+            logger.info(uxstring.UxString.flush_insufficient_earnings)
         else:
-            raise e
-
+            raise ex

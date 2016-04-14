@@ -1,282 +1,185 @@
-"""
-Buy from a machine-payable endpoint
-"""
-# standard python
-import json
-import datetime
+"""Buy from a machine-payable endpoint."""
+# standart python imports
 import re
+import json
+import urllib.parse
+import logging
 
-# 3rd party
+# 3rd party imports
 import click
 
 # two1 imports
-from two1.commands.status import _get_balances
-from two1.commands.config import TWO1_MERCHANT_HOST
-from two1.commands.config import TWO1_HOST
-from two1.lib.server import rest_client
-from two1.commands.formatters import search_formatter
-from two1.commands.formatters import sms_formatter
-from two1.lib.server.analytics import capture_usage
-from two1.lib.bitrequests import OnChainRequests
-from two1.lib.bitrequests import BitTransferRequests
-from two1.lib.bitrequests import ChannelRequests
-from two1.lib.bitrequests import ResourcePriceGreaterThanMaxPriceError
-from two1.lib.util.uxstring import UxString
-from two1.lib.wallet.fees import get_fees
-from two1.lib.channels.statemachine import PaymentChannelStateMachine
+import two1.channels as channels
+import two1.commands.util.uxstring as uxstring
+import two1.bitrequests as bitrequests
+import two1.commands.util.decorators as decorators
+import two1.channels.statemachine as statemachine
 
 
-URL_REGEXP = re.compile(
-    r'^(?:http)s?://'  # http:// or https://
-    # domain...
-    r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+(?:[A-Z]{2,6}\.?|[A-Z0-9-]{2,}\.?)|'
-    r'localhost|'  # localhost...
-    r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'  # ...or ip
-    r'(?::\d+)?'  # optional port
-    r'(?:/?|[/?]\S+)$', re.IGNORECASE)
+# Creates a ClickLogger
+logger = logging.getLogger(__name__)
 
-DEMOS = {
-    "search": {"path": "/search/bing", "formatter": search_formatter},
-    "sms": {"path": "/phone/send-sms", "formatter": sms_formatter}
-}
 
-@click.group()
-@click.option('-p', '--payment-method', default='offchain', type=click.Choice(['offchain', 'onchain', 'channel']))
-@click.option('--maxprice', default=10000, help="Maximum amount to pay")
+@click.command()
+@click.argument('resource', nargs=2)
 @click.option('-i', '--info', 'info_only', default=False, is_flag=True, help="Retrieve initial 402 payment information.")
+@click.option('-p', '--payment-method', default='offchain', type=click.Choice(['offchain', 'onchain', 'channel']))
+@click.option('-H', '--header', multiple=True, default=None, help="HTTP header to include with the request")
+@click.option('-X', '--request', 'method', default='GET', help="HTTP request method")
+@click.option('-o', '--output', 'output_file', default=None, help="Output file")
+@click.option('-d', '--data', default=None, help="Data to send in HTTP body")
+@click.option('--data-file', type=click.File('rb'), help="Data file to send in HTTP body")
+@click.option('--maxprice', default=10000, help="Maximum amount to pay")
 @click.pass_context
-def buy(ctx, payment_method, maxprice, info_only):
+@decorators.catch_all
+@decorators.capture_usage
+def buy(ctx, resource, **options):
     """Buy API calls with mined bitcoin.
 
 \b
 Usage
 -----
-Execute a search query for bitcoin. See no ads.
-$ 21 buy search "Satoshi Nakamoto"
+Get state, city, latitude, longitude, and estimated population for a given zip code.
+$ 21 buy "https://mkt.21.co/zipdata/collect?zip_code=94109" --maxprice 2750
 
-\b
-See the price in Satoshis of one bitcoin-payable search.
-$ 21 buy --info search
-
-\b
-See the help for search.
-$ 21 buy search -h
-
-\b
-Send an SMS to a phone number.
-$ 21 buy sms +15005550002 "I just paid for this SMS with BTC"
-
-\b
-See the price in Satoshis of one bitcoin-payable sms.
-$ 21 buy --info sms
-
-\b
-See the help for sms.
-$ 21 buy sms -h
 """
-    ctx.obj["payment_method"] = payment_method
-    ctx.obj["maxprice"] = maxprice
-    ctx.obj["info_only"] = info_only
+    # Get requested URL resource for `21 buy <URL>` syntax
+    buy_url = resource[0]
 
-    # Bypass subcommand if the user is only requesting its 402 information
-    if ctx.invoked_subcommand and ctx.invoked_subcommand != "url" and info_only:
-        _buy(ctx.obj["config"], ctx.invoked_subcommand,
-             None, None, None, None,
-             payment_method, maxprice, info_only)
-        ctx.exit()
+    # Backwards compatibility for `21 buy url <URL>` syntax
+    if resource[0] == 'url':
+        buy_url = resource[1]
+
+    _buy(ctx.obj['config'], ctx.obj['client'], ctx.obj['machine_auth'], buy_url, **options)
 
 
-@click.argument('query')
-@buy.command()
-@click.pass_context
-def search(ctx, query):
-    """Execute a search query for bitcoin. See no ads.
+def _buy(config, client, machine_auth, resource, info_only=False, payment_method='offchain', header=(), method='GET', output_file=None, data=None, data_file=None, maxprice=10000):
+    """Purchase a 402-enabled resource via CLI.
 
-\b
-Example
--------
-$ 21 buy search "First Bitcoin Computer"
-"""
-    _buy(ctx.obj["config"],
-         "search",
-         dict(query=query),
-         "GET",
-         None,
-         None,
-         ctx.obj["payment_method"],
-         ctx.obj["maxprice"],
-         ctx.obj["info_only"])
-
-
-@click.argument('body')
-@click.argument('phone_number')
-@buy.command()
-@click.pass_context
-def sms(ctx, phone_number, body):
-    """Send an SMS to a phone number.
-
-\b
-Example
--------
-$ 21 buy sms +15005550002 "I just paid for this SMS with BTC"
-"""
-    _buy(ctx.obj["config"],
-         "sms",
-         dict(phone=phone_number, text=body),
-         "POST",
-         None,
-         None,
-         ctx.obj["payment_method"],
-         ctx.obj["maxprice"],
-         ctx.obj["info_only"])
-
-
-@click.argument('resource', nargs=1)
-@click.option('-X', '--request', 'method', default='GET', help="HTTP request method")
-@click.option('-d', '--data', default=None, help="Data to send in HTTP body")
-@click.option('--data-file', type=click.File('rb'), help="Data file to send in HTTP body")
-@click.option('-o', '--output', 'output_file', type=click.File('wb'), help="Output file")
-@buy.command()
-@click.pass_context
-def url(ctx, resource, data, method, data_file, output_file):
-    """Buy any machine payable endpoint.
-
-\b
-Example
--------
-$ 21 buy url https://market.21.co/phone/send-sms --data '{"phone":"+15005550002","text":"hi"}'
-"""
-    _buy(ctx.obj["config"],
-         resource,
-         data,
-         method,
-         data_file,
-         output_file,
-         ctx.obj["payment_method"],
-         ctx.obj["maxprice"],
-         ctx.obj["info_only"])
-
-
-@capture_usage
-def _buy(config, resource, data, method, data_file, output_file,
-         payment_method, max_price, info_only):
-    """
-    Buys bitcoin payable content over http
-
-    Todo:
-        reduce number of input args
-        Exception is too general, raise a different exception when user cannot pay
+    This function attempts to purchase the requested resource using the
+    `payment_method` and then write out its results to STDOUT. This allows a
+    user to view results or pipe them into another command-line function.
 
     Args:
-        config (Config): config object used for getting .two1 information
-        resource (str): resource or content to purchase
-        method (str): HTTP request method, defaults to GET
-        data_file (str): name of the data file to send in HTTP body
-        output_file (str): Output file name
-        payment_method (str): Type of payment used in the purchase: offchain, onchain, channel
-        max_price (int): Max price of resource
-        info_only (bool): Flag which will only get info and not  purcahase the resource
+        config (two1.commands.config.Config): an object necessary for various
+            user-specific actions, as well as for using the `capture_usage`
+            function decorator.
+        client (two1.server.rest_client.TwentyOneRestClient) an object for
+            sending authenticated requests to the TwentyOne backend.
+        machine_auth (two1.server.machine_auth.MachineAuthWallet): a wallet used
+            for machine authentication.
+        resource (str): a URI of the form scheme://host:port/path with `http`
+            and `https` strictly enforced as required schemes.
+        info_only (bool): if True, do not purchase the resource, and cause the
+            function to write only the 402-related headers.
+        payment_method (str): the payment method used for the purchase.
+        header (tuple): list of HTTP headers to send with the request.
+        method (str): the HTTP method/verb to make with the request.
+        output_file (str): name of the file to redirect function output.
+        data (str): serialized data to send with the request. The function will
+            attempt to deserialize the data and determine its encoding type.
+        data_file (str): name of the data file to send in HTTP body.
+        maxprice (int): allowed maximum price (in satoshis) of the resource.
 
     Raises:
-        NotImplementedError: if endpoint or resource is not valid
-        ResourcePriceGreaterThanMaxPriceError: If the resource price is greater than the max price
+        click.ClickException: if some set of parameters or behavior cause the
+            purchase to not complete successfully for any reason.
     """
-    # If resource is a URL string, then bypass seller search
-    if URL_REGEXP.match(resource):
-        target_url = resource
-        seller = target_url
-    elif re.match(r'^(((\w*)(\/){0,1})(\w*)){0,2}(\/){0,1}$', resource) and resource not in DEMOS:
-        target_url = 'https://mkt.21.co/' + resource
-        seller = target_url
-    elif resource in DEMOS:
-        target_url = TWO1_MERCHANT_HOST + DEMOS[resource]["path"]
-        data = json.dumps(data)
+    # Find the correct payment method
+    if payment_method == 'offchain':
+        requests = bitrequests.BitTransferRequests(machine_auth, config.username)
+    elif payment_method == 'onchain':
+        requests = bitrequests.OnChainRequests(machine_auth.wallet)
+    elif payment_method == 'channel':
+        requests = bitrequests.ChannelRequests(machine_auth.wallet)
     else:
-        # If we can't figure out the resource type, attempt to use `http`
-        target_url = 'http://' + resource
+        raise click.ClickException(uxstring.UxString.buy_bad_payment_method.format(payment_method))
 
-    # Change default HTTP method from "GET" to "POST", if we have data
-    if method == "GET" and (data or data_file):
-        method = "POST"
+    # Request user consent if they're creating a channel for the first time
+    if payment_method == 'channel' and not requests._channelclient.list():
+        confirmed = click.confirm(uxstring.UxString.buy_channel_warning.format(requests.DEFAULT_DEPOSIT_AMOUNT, statemachine.PaymentChannelStateMachine.PAYMENT_TX_MIN_OUTPUT_AMOUNT), default=True)
+        if not confirmed:
+            raise click.ClickException(uxstring.UxString.buy_channel_aborted)
 
-    # Set default headers for making bitrequests with JSON-like data
-    headers = {'Content-Type': 'application/json'}
+    # Parse the url and validate its format
+    if re.match(r'^(((\w*)(\/){0,1})(\w*)){0,2}(\/){0,1}$', resource):
+        resource = 'https://mkt.21.co/' + resource
+    _resource = urllib.parse.urlparse(resource)
 
+    # Assume `http` as default protocol
+    if 'http' not in _resource.scheme:
+        resource = 'http://' + resource
+
+    # Retrieve 402-related header information, print it, then exit
+    if info_only:
+        response = requests.get_402_info(resource)
+        return logger.info('\n'.join(['{}: {}'.format(key, val) for key, val in response.items()]))
+
+    # Collect HTTP header parameters into a single dictionary
+    headers = {key.strip(): value.strip() for key, value in (h.split(':') for h in header)}
+
+    # Handle data if applicable
+    if data or data_file:
+        method = 'POST' if method == 'GET' else method
+        data, headers['Content-Type'] = _parse_post_data(data)
+
+    # Make the paid request for the resource
     try:
-        # Find the correct payment method
-        if payment_method == 'offchain':
-            bit_req = BitTransferRequests(config.machine_auth, config.username)
-        elif payment_method == 'onchain':
-            bit_req = OnChainRequests(config.wallet)
-        elif payment_method == 'channel':
-            bit_req = ChannelRequests(config.wallet)
-            channel_list = bit_req._channelclient.list()
-            if not channel_list:
-                confirmed = click.confirm(UxString.buy_channel_warning.format(
-                    bit_req.DEFAULT_DEPOSIT_AMOUNT,
-                    PaymentChannelStateMachine.PAYMENT_TX_MIN_OUTPUT_AMOUNT), default=True)
-                if not confirmed:
-                    raise Exception(UxString.buy_channel_aborted)
-
-        else:
-            raise Exception('Payment method does not exist.')
-
-        # Make the request
-        if info_only:
-            res = bit_req.get_402_info(target_url)
-        else:
-            res = bit_req.request(
-                method.lower(), target_url, max_price=max_price,
-                data=data or data_file, headers=headers)
-    except ResourcePriceGreaterThanMaxPriceError as e:
-        config.log(UxString.Error.resource_price_greater_than_max_price.format(e))
-        return
+        response = requests.request(method.lower(), resource, max_price=maxprice, data=data or data_file, headers=headers)
+    except bitrequests.ResourcePriceGreaterThanMaxPriceError as e:
+        raise click.ClickException(uxstring.UxString.Error.resource_price_greater_than_max_price.format(e))
     except Exception as e:
-        f = get_fees()
-        buy_fee = 2 * f['per_input'] + f['per_output']
-        if 'Insufficient funds.' in str(e):
-            config.log(UxString.Error.insufficient_funds_mine_more.format(
-                buy_fee
-            ))
-        else:
-            config.log(str(e), fg="red")
+        raise click.ClickException(e)
+
+    # Write response text to stdout or a filename if provided
+    if not output_file:
+        logger.info(response.content, nl=False)
+    else:
+        with open(output_file, 'wb') as f:
+            logger.info(response.content, file=f, nl=False)
+
+    # Exit successfully if no amount was paid for the resource (standard HTTP request)
+    if not hasattr(response, 'amount_paid'):
         return
 
-    # Output results to user
-    if output_file:
-        # Write response output file
-        output_file.write(res.content)
-    elif info_only:
-        # Print headers that are related to 402 payment required
-        for key, val in res.items():
-            config.log('{}: {}'.format(key, val))
-    elif resource in DEMOS:
-        config.log(DEMOS[resource]["formatter"](res))
-    else:
-        # Write response to console
-        config.log(res.text)
+    # Fetch and write out diagnostic payment information for balances
+    if payment_method == 'offchain':
+        twentyone_balance = client.get_earnings()["total_earnings"]
+        logger.info(uxstring.UxString.buy_balances.format(response.amount_paid, '21.co', twentyone_balance), err=True)
+    elif payment_method == 'onchain':
+        onchain_balance = min(requests.wallet.confirmed_balance(), requests.wallet.unconfirmed_balance())
+        logger.info(uxstring.UxString.buy_balances.format(response.amount_paid, 'blockchain', onchain_balance), err=True)
+    elif payment_method == 'channel':
+        channel_client = requests._channelclient
+        channel_client.sync()
+        channels_balance = sum(s.balance for s in (channel_client.status(url) for url in channel_client.list())
+                               if s.state == channels.PaymentChannelState.READY)
+        logger.info(uxstring.UxString.buy_balances.format(response.amount_paid, 'payment channels', channels_balance), err=True)
 
-    # Write the amount paid out if something was truly paid
-    if not info_only and hasattr(res, 'amount_paid'):
-        client = rest_client.TwentyOneRestClient(TWO1_HOST,
-                                                 config.machine_auth,
-                                                 config.username)
-        user_balances = _get_balances(config, client)
-        if payment_method == 'offchain':
-            balance_amount = user_balances.twentyone
-            balance_type = '21.co'
-        elif payment_method == 'onchain':
-            balance_amount = user_balances.onchain
-            balance_type = 'blockchain'
-        elif payment_method == 'channel':
-            balance_amount = user_balances.channels
-            balance_type = 'payment channels'
-        config.log("You spent: %s Satoshis. Remaining %s balance: %s Satoshis." % (
-            res.amount_paid, balance_type, balance_amount))
 
-    # Record the transaction if it was a payable request
-    if hasattr(res, 'paid_amount'):
-        config.log_purchase(s=seller,
-                            r=resource,
-                            p=res.paid_amount,
-                            d=str(datetime.datetime.today()))
+def _parse_post_data(data):
+    """Parse a string into a data object that `requests` can use.
+
+    Args:
+        data (str): a serialized string consisting of key-value pairs
+
+    Returns:
+        dict: parsed dictionary of key-value pairs
+        header: the appropriate `Content-Type` header for the data
+    """
+    JSON_HEADER = 'application/json'
+    FORM_URLENCODED_HEADER = 'application/x-www-form-urlencoded'
+
+    # Attempt to decode data as json
+    try:
+        json.loads(data)
+        return data, JSON_HEADER
+    except ValueError:
+        pass
+
+    # Attempt to decode data as form url-encoded
+    url_data = {key: vals[0] for key, vals in urllib.parse.parse_qs(data).items()}
+    if len(url_data.keys()):
+        return data, FORM_URLENCODED_HEADER
+
+    raise click.ClickException(uxstring.UxString.buy_bad_data_format)
