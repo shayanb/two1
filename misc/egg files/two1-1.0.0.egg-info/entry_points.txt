@@ -1,7 +1,0 @@
-[console_scripts]
-21 = two1.cli:main
-twentyone = two1.cli:main
-two1 = two1.cli:main
-wallet = two1.lib.wallet.cli:main
-walletd = two1.lib.wallet.daemon:main
-
