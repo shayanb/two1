@@ -9,6 +9,7 @@ import click
 
 # two1 imports
 import two1
+from two1.commands.util import bitcoin_computer
 from two1.commands.util import exceptions
 from two1.commands.util import uxstring
 from two1.commands.util import decorators
@@ -67,8 +68,9 @@ def login_account(config, machine_auth, username=None, password=None):
         username (str): optional command line arg to skip username prompt
         password (str): optional command line are to skip password prompt
     """
-    # prints the sign up page link
-    logger.info(uxstring.UxString.signin_title)
+    # prints the sign up page link when a username is not set and not on a BC
+    if not config.username and not bitcoin_computer.has_mining_chip():
+        logger.info(uxstring.UxString.signin_title)
 
     # uses specifies username or asks for a different one
     username = username or get_username_interactive()
@@ -121,7 +123,11 @@ def create_account_on_bc(config, machine_auth):
     logger.info(uxstring.UxString.missing_account)
     email = None
     username = None
+    fullname = None
     while True:
+        if not fullname:
+            fullname = click.prompt(uxstring.UxString.enter_name)
+
         if not email:
             email = click.prompt(uxstring.UxString.enter_email, type=EmailAddress())
 
@@ -140,7 +146,7 @@ def create_account_on_bc(config, machine_auth):
         try:
             # change the username of the given username
             rest_client = _rest_client.TwentyOneRestClient(two1.TWO1_HOST, machine_auth, username)
-            rest_client.account_post(payout_address, email, password)
+            rest_client.account_post(payout_address, email, password, fullname)
 
         # Do not continue creating an account because the UUID is invalid
         except exceptions.BitcoinComputerNeededError:
@@ -248,12 +254,10 @@ class Password(click.ParamType):
         click.ParamType.__init__(self)
 
     def convert(self, value, param, ctx):
-        if len(value) < 5:
+        if len(value) < 8:
             self.fail(uxstring.UxString.short_password)
         if not any(x.isupper() for x in value) or not any(x.islower() for x in value):
             self.fail(uxstring.UxString.capitalize_password)
-        if not any(x.isdigit() for x in value):
-            self.fail(uxstring.UxString.numbers_in_password)
 
         return value
 

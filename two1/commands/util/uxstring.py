@@ -15,7 +15,8 @@ class UxString:
                                           "this service. If you believe you have received this "
                                           "message in error, please contact support@21.co.",
                                           fg="red")
-    max_accounts_reached = click.style("You have reached the maximum number of 21.co accounts that you can create. ", fg="red") +\
+    max_accounts_reached = click.style(
+        "You have reached the maximum number of 21.co accounts that you can create. ", fg="red") +\
         click.style("Use ", fg="red") +\
         click.style("21 login ", fg="red", bold=True) +\
         click.style("to switch between your available accounts.", fg="red")
@@ -27,6 +28,7 @@ class UxString:
     account_failed = "Failed to create 21.co account."
     username_exists = "User {} already exists."
     email_exists = "Email {} already exists."
+    enter_name = "Enter your full name"
     enter_username = "Enter a username for your 21.co account"
     enter_email = "Enter your email address"
     enter_username_retry = "Create a new username and retry."
@@ -34,7 +36,8 @@ class UxString:
     create_wallet = "You do not have a Bitcoin wallet configured. "\
         "Let's create one. Press any key ...\n"
     create_wallet_done = "Wallet successfully created.\n\n"\
-                         "You can recover the private key to your wallet using the following 12 words (in this order) :\n"\
+                         "You can recover the private key to your wallet using the "\
+                         "following 12 words (in this order) :\n"\
                          "\n%s\n\n"\
                          "Write down and store these words in a safe place.\n\n"\
                          "Press any key ..."
@@ -44,7 +47,8 @@ class UxString:
     analytics_optin = "\nWould you like to help 21.co collect usage analytics?\n"\
         "This may help us debug any issues and improve software quality."
     analytics_thankyou = "Thank you!\n"
-    unconfirmed_email = "Before logging in, you must activate your 21 account using the email sent to you at {}. If you can't find the email, please visit 21.co/activation."
+    unconfirmed_email = "Before logging in, you must activate your 21 account using the " \
+                        "email sent to you at {}. If you can't find the email, please visit 21.co/activation."
 
     flush_success = "{}\n"\
         "Your mined Satoshis will be sent to you on the "\
@@ -54,7 +58,7 @@ class UxString:
         "To get more bitcoin, use {}."
 
     # username
-    login_username = "\nUsername (Case sensitive)"
+    login_username = "\nUsername"
     login_password = "Password (Typing will be hidden)"
     login_in_progress = "logging in {}."
     login_required = "Account login is required.\n\n\tRun {} first.".format(click.style("21 login", bold=True))
@@ -85,9 +89,8 @@ class UxString:
                        click.style("21 login", bold=True) +\
                        " to create an account first."
 
-    short_password = "Password must be at least 5 characters long."
-    capitalize_password = "Password must contain mix of uppercase or lowercase letters."
-    numbers_in_password = "Password must contain at least a digit."
+    short_password = "Password must be at least 8 characters long."
+    capitalize_password = "Password must contain mix of uppercase or lowercase characters."
 
     # status
     status_exit_message = "\nUse {} to buy API calls for bitcoin from 21.co.\nFor help, do {}."
@@ -184,7 +187,7 @@ class UxString:
         "To buy bitcoin, you need to pair your 21 and {} account.\n\n" + \
         "If you already haven't, create a password for your account by " \
         "doing " + click.style("21 login -setpassword",
-                               bold=True) + "\nThen go to http://21.co/{}/buybitcoin in your " \
+                               bold=True) + "\nThen go to http://21.co/{}/config/coinbase/ in your " \
                                             "browser to complete the pairing\n"
     buybitcoin_no_payment_method = \
         "To add a payment method to {}, go to {}."
@@ -249,7 +252,8 @@ class UxString:
     mining_limit_reached = "\nFurther mining advances are not possible at this time. " \
                            "Please try again in a few hours"
 
-    mining_bitcoin_computer_needed = click.style("You need a 21 Bitcoin Computer (21.co/buy) to access this service. \nYou can use ", fg="red") +\
+    mining_bitcoin_computer_needed = click.style(
+        "You need a 21 Bitcoin Computer (21.co/buy) to access this service. \nYou can use ", fg="red") +\
         click.style("21 buybitcoin", bold=True, fg="red") +\
         click.style(" to add Bitcoins to your account instead. \nIf you believe you have received this ", fg="red") +\
         click.style("message in error, please contact support@21.co.", fg="red")
@@ -259,6 +263,8 @@ class UxString:
     update_package = "Updating to version {}..."
     update_superuser = "You might need to enter superuser password."
     update_not_needed = "Already up to date!"
+    post_apt_remove_reboot = "You need to reboot in order for this update to take effect."
+    reboot_prompt = "Do you want to reboot now?"
 
     # flush
     flush_status = "\n* Your flushed amount of %s Satoshis will appear " \
@@ -266,6 +272,8 @@ class UxString:
 
     flush_insufficient_earnings = "You must have a minimum of 20000 Satoshis to " \
                                   "be able to flush your earnings to the Blockchain"
+
+    flush_not_enough_earnings = "You don't have enough balance to flush {} Satoshis."
     # ad
     buy_ad = "Get a 21 Bitcoin Computer at https://21.co/buy"
 
@@ -291,13 +299,11 @@ class UxString:
 
     debit_message = "{} : {:+d} Satoshis to your 21.co balance"
     blockchain_credit_message = "{} : {:+d} Satoshis from your 21.co balance, " \
-                                "{:+d} Satoshis to " \
-                                "your " \
-                                "Blockchain balance"
+                                "{:+d} Satoshis to your Blockchain balance"
     credit_message = "{} : {:+d} Satoshis from your 21.co balance"
 
-    buy_message = "You bought {} from {}"
-    sell_message = "You sold {} to {}"
+    buy_message = "You bought '{}' from {}"
+    sell_message = "You sold '{}' to {}"
 
     unread_notifications = click.style("\nYou have {} unread notifications. Type ", fg="blue") +\
         click.style("21 inbox", bold=True, fg="blue") +\
@@ -358,6 +364,11 @@ class UxString:
         "{} successfully published to {}. It may take a couple of minutes for your app "
         "to show up in the marketplace.\nYou can view your app at https://21.co/mkt.", fg="magenta")
 
+    app_url_claimed = "The endpoint {} specified in your manifest has already been registered in " \
+                      "the marketplace by another user.\nPlease check your manifest file and make " \
+                      "sure your 'host' field is correct.\nIf the problem persists please contact " \
+                      "support@21.co."
+
     valid_app_categories = {'blockchain', 'entertainment', 'social', 'markets', 'utilities', 'iot'}
 
     valid_top_level_manifest_fields = ["schemes", "host", "basePath", "x-21-manifest-path", "info"]
@@ -372,8 +383,8 @@ class UxString:
                                               fg="red")
 
     manifest_contact_fields = {"name", "email"}
-    manifest_contact_field_missing = click.style("Field '{}' is missing from the manifest file under the 'contact' section.",
-                                                 fg="red")
+    manifest_contact_field_missing = click.style(
+        "Field '{}' is missing from the manifest file under the 'contact' section.", fg="red")
 
     price_fields = ["min", "max"]
     price_fields_missing = click.style("Field '{}' is missing from the manifest file under the "
@@ -464,8 +475,8 @@ class UxString:
 
     send_success = ("Successfully sent {0} satoshis to {1}.\ntxid: {2}\ntxn: {3}\n"
                     "To see on the blockchain: https://blockexplorer.com/tx/{2}")
-    send_insufficient_confirmed = (
-        "Insufficient confirmed balance. However, you can use unconfirmed transactions with --use-unconfirmed.")
+    send_insufficient_confirmed = ("Insufficient confirmed balance. However, you can use unconfirmed"
+                                   " transactions with --use-unconfirmed. ")
     send_insufficient_blockchain = (
         "Insufficient Blockchain balance of {} satoshis.\nCannot send {} satoshis to {}.\n"
         "Run %s, then %s to increase your Blockchain balance." %
@@ -475,9 +486,17 @@ class UxString:
     # logger
     less_env = '-RPpress h for help, q for quit'
     lib_import_warning = click.style(
-        "{}\n{: ^80}\n{}".format("#" * 80,
-                                 "Warning: two1.lib* packages have been moved under two1. Update your imports asap!",
-                                 "#" * 80), fg="yellow")
+        "\n".join((
+            "#" * 80,
+            "Warning: two1.lib.* packages have been moved to two1.*",
+            "Update your imports immediately!",
+            "",
+            "For example:",
+            "-from two1.lib.wallet import Wallet",
+            "+from two1.wallet import Wallet",
+            "#" * 80
+        )),
+        fg="yellow")
 
     class Error:
         """ Put all Error type uxstrings here """
@@ -518,18 +537,19 @@ class UxString:
         update_server_connection = click.style("Could not connect to the update server. Please try again later.",
                                                fg="red")
         account_failed = "Could not create a 21 account. Please contact support at support@21.co"
+        removal_failed = click.style("Could not remove the two1 package from apt. Please run the following command manually:\n", fg="red") +\
+            click.style("\t\nsudo apt-get autoremove --purge two1", bold=True)
 
         # version errors
-        version_not_detected = click.style("Could not properly detect your version of 21. "
-                                           "Try reinstalling or contact support@21.co.",
-                                           fg="red")
+        version_not_detected = click.style(
+            "Could not properly detect your version of 21. Try reinstalling or contact support@21.co.", fg="red")
         resource_price_greater_than_max_price = "{} \nPlease use --maxprice to adjust the maximum price."
-        insufficient_funds_mine_more = str("Insufficient satoshis for off-chain (zero-fee) transaction. " +
-                                           "Type {} to get more.*\n\n" +
-                                           "You may also use your on-chain balance for this transaction. It will include a {} satoshi tx fee." +
-                                           "To use on-chain balance add {} to your buy command*").format(click.style("21 mine", bold=True),
-                                                                                                         {},
-                                                                                                         click.style("-p onchain", bold=True))
+        insufficient_funds_mine_more = str(
+            "Insufficient satoshis for off-chain (zero-fee) transaction. Type {} to get more.*\n\nYou may also"
+            " use your on-chain balance for this transaction. It will include a {} satoshi tx fee. To use "
+            "on-chain balance add {} to your buy command*"
+        ).format(click.style("21 mine", bold=True), {}, click.style("-p onchain", bold=True))
+
         # account errors
         login_error_username = "Can not log into account, username not set"
         login_error_mining_auth_pubkey = "Can not log into account, username not set"

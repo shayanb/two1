@@ -2,7 +2,6 @@
 # standard python imports
 import sys
 import re
-import os
 import logging
 import subprocess
 from datetime import datetime
@@ -21,9 +20,9 @@ import two1
 from two1.commands.util import uxstring
 from two1.commands.util import decorators
 from two1.commands.util import exceptions
+from two1.commands.util import bitcoin_computer
 
 
-TWO1_APT_INSTALL_PACKAGE_PATH = "/usr/lib/python3/dist-packages/" + two1.TWO1_PACKAGE_NAME
 LAST_CHECKED_FORMAT = "%Y-%m-%d"
 
 # Creates a ClickLogger
@@ -50,26 +49,10 @@ $ 21 update
 def _update(config, version, force_update_check=False):
     """ Handles updating the CLI software including any dependencies.
 
-        How does the update work?
-
-        1) If update check has not been performed today, check to see if an
-           update is available.
-
-            Note: running `21 update` will always force the update
-
-        2) If a new version is available, run the updater and reset the update
-           check.
-
-        Key State Variables in the config:
-            config.last_update_check (str): This stores the last date on
-            which an update check was performed in %Y-%m-%d format.
-
         Args:
             config (Config): Config context object
-            version (string): The requested version of 21 to install (defaults
-                to 'latest')
-            force_update_check (bool): Forces an update check with the pypi
-            service
+            version (string): The requested version of 21 to install (defaults to 'latest')
+            force_update_check (bool): Forces an update check with the pypi service
 
         Returns:
             dict: A dict with two keys are returned.
@@ -103,12 +86,12 @@ def _update(config, version, force_update_check=False):
         # on how two1 was installed in the first place.
         logger.info(uxstring.UxString.update_package.format(latest_version))
 
-        # This detection only works for deb based linux systems
-        # Detect if the package was installed using apt-get
-        if os.path.isdir(TWO1_APT_INSTALL_PACKAGE_PATH):
+        # pip install the latest package
+        perform_pip_based_update(latest_version)
+
+        # On a BC also see if there are any apt packages available
+        if bitcoin_computer.has_mining_chip():
             perform_apt_based_update(latest_version)
-        else:
-            perform_pip_based_update(latest_version)
     else:
         # Alert the user if there is no newer version available
         logger.info(uxstring.UxString.update_not_needed)
@@ -156,19 +139,18 @@ def lookup_pypi_version(version=None):
     except ValueError:
         raise exceptions.Two1Error(uxstring.UxString.Error.version_not_found)
 
-    pypi_version = None
-
     try:
         packages = data["packages"]
 
         # gets all stable versions from list of packages
-        versions = [package['version'] for package in packages if re.search(r'\d\.\d(\.\d)?$', package['version'])]
+        versions = [package['version'] for package in packages
+                    if re.search(r'\d+\.\d+\.\d+', package['version'])]
 
         if not versions:
             raise exceptions.Two1Error(uxstring.UxString.Error.version_not_found)
 
         # gets the max version from all available versions
-        latest_version = max(versions, key=lambda version: int(version.replace(".", "")))
+        latest_version = max(versions, key=LooseVersion)
 
         # make sure version given is valid
         if version:
@@ -176,14 +158,13 @@ def lookup_pypi_version(version=None):
                 return version
             else:
                 raise exceptions.Two1Error(
-                        uxstring.UxString.Error.version_does_not_exist.format(version, latest_version))
+                        uxstring.UxString.Error.version_does_not_exist.format(version,
+                                                                              latest_version))
         else:
             return latest_version
 
     except (AttributeError, KeyError, TypeError):
         raise exceptions.Two1Error(uxstring.UxString.Error.version_not_found)
-
-    return pypi_version
 
 
 def checked_for_an_update_today(config):
@@ -215,7 +196,7 @@ def checked_for_an_update_today(config):
 
 
 def perform_pip_based_update(version):
-    """ Performs a pip3 based update
+    """ Performs a pip based update installing two1 and all dependencies
 
     Raises:
         Two1Error: if the update subprocess call is not successfull
@@ -225,9 +206,11 @@ def perform_pip_based_update(version):
                        "-i",
                        "{}/pypi".format(two1.TWO1_PYPI_HOST),
                        "-U",
-                       "--no-deps",
                        "-I",
                        "{}=={}".format(two1.TWO1_PACKAGE_NAME, version)]
+
+    if "https" not in two1.TWO1_PYPI_HOST:
+        install_command += ["--trusted-host", two1.TWO1_PYPI_HOST.replace("http://", "")]
 
     stop_walletd()
 
@@ -260,13 +243,55 @@ def perform_apt_based_update(version):
     upgrade_command = ["sudo",
                        "apt-get",
                        "-y",
+                       "--force-yes",
                        "install",
-                       "--only-upgrade",
-                       "{}={}-1".format(two1.TWO1_PACKAGE_NAME, version),
-                       "minerd",
-                       "zerotier-one"]
+                       "zerotier-one",
+                       "bitcoind",
+                       "minerd"]
+
     try:
+        # remove two1 if its installed via apt-get
+        has_apt_two1 = has_apt_two1_installed()
+        if has_apt_two1:
+            remove_apt_two1()
+
+        # install BC dependencies for two1
         subprocess.check_call(update_command)
         subprocess.check_call(upgrade_command)
+
+        # reboot system after removing apt-get two1 packages
+        if has_apt_two1:
+            logger.info(uxstring.UxString.post_apt_remove_reboot)
+
+            if click.confirm(uxstring.UxString.reboot_prompt):
+                subprocess.check_call(["sudo", "reboot"])
     except (subprocess.CalledProcessError, OSError, FileNotFoundError):
         raise exceptions.Two1Error(uxstring.UxString.Error.update_failed)
+
+
+def has_apt_two1_installed():
+    """ Uses apt-cache to check if two1 is installed on the system
+
+    Returns:
+        bool: True if two1 is installed in apt, False otherwise
+    """
+    try:
+        subprocess.check_call(["sudo", "apt-cache", "show", "two1"], stdout=subprocess.PIPE)
+    except (subprocess.CalledProcessError, OSError, FileNotFoundError):
+        return False
+
+    return True
+
+
+def remove_apt_two1():
+    """ Removes two1 and all of its dependencies from apt-get """
+    try:
+        subprocess.check_call(["sudo",
+                               "apt-get",
+                               "autoremove",
+                               "--purge",
+                               "-y",
+                               "--force-yes",
+                               "two1"])
+    except (subprocess.CalledProcessError, OSError, FileNotFoundError):
+        raise exceptions.Two1Error(uxstring.UxString.Error.removal_failed)
