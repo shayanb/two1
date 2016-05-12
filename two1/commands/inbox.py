@@ -1,12 +1,13 @@
-""" Two1 command module for getting and displaying messages in your inbox """
+"""View notifications from 21.co"""
 # standard python imports
-from datetime import datetime
 import logging
 
 # 3rd party imports
 import click
 
 # two1 imports
+from two1 import util
+
 from two1.commands.util import decorators
 from two1.commands.util import uxstring
 
@@ -20,12 +21,12 @@ logger = logging.getLogger(__name__)
 @decorators.json_output
 @decorators.capture_usage
 def inbox(ctx):
-    """ Shows a list of notifications for your account """
+    """View notifications from 21.co."""
     return _inbox(ctx.obj['config'], ctx.obj['client'])
 
 
 def _inbox(config, client):
-    """ Shows a list of notifications on a click pager
+    """Show a list of notifications on a click pager.
 
     Args:
         config (Config): config object used for getting .two1 information
@@ -52,11 +53,11 @@ def _inbox(config, client):
     if has_unreads:
         client.mark_notifications_read(config.username)
 
-    return notifications
+    return tuple(map(click.unstyle, notifications))
 
 
 def get_notifications(config, client):
-    """ Uses the rest client to get the inbox notifications and sorts by unread messages first
+    """Use the rest client to get the inbox notifications and sort by unread messages first.
 
     Args:
         config (Config): config object used for getting .two1 information
@@ -90,7 +91,7 @@ def get_notifications(config, client):
 
 
 def create_notification_line(msg):
-    """ creates a formatted notification line from a message dict
+    """Create a formatted notification line from a message dict.
 
     Args:
         msg (dict): a raw inbox notification in dict format
@@ -98,7 +99,7 @@ def create_notification_line(msg):
     Returns:
         str: a formatted notification message
     """
-    local_time = datetime.fromtimestamp(msg["time"]).strftime("%Y-%m-%d %H:%M")
+    local_time = util.format_date(msg["time"])
     message_line = click.style("{} : {} from {}\n".format(local_time, msg["type"],
                                                           msg["from"]),
                                fg="cyan")

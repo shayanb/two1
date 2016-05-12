@@ -1,11 +1,8 @@
-""" When you are not feeling well come see the Doctor
-
-    '21 doctor' is a command that will run through several
-    on your system to highligh any issues.
-"""
-# standard python import
+"""Diagnose 21 installation."""
+from distutils.version import LooseVersion
+from pkg_resources import parse_version
+from pkg_resources import SetuptoolsVersion
 import os
-import re
 import platform
 import shutil
 import socket
@@ -14,18 +11,14 @@ import enum
 import urllib.parse as parse
 import logging
 
-# 3rd party imports
 import click
 import requests
 
-# two1 imports
 import two1
-from two1.commands import update
 from two1.commands.util import uxstring
 from two1.commands.util import decorators
 from two1.commands.util import exceptions
 from two1.commands.util import bitcoin_computer
-
 
 # Creates a ClickLogger
 logger = logging.getLogger(__name__)
@@ -69,11 +62,12 @@ class Doctor(object):
         sytem is functioning correctly.
     """
 
-    # Types of checkups avialable
+    # Types of checkups available
     SPECIALTIES = {
         "general": uxstring.UxString.doctor_general,
         "server": uxstring.UxString.doctor_servers,
         "dependency": uxstring.UxString.doctor_dependencies,
+        "BC": uxstring.UxString.doctor_BC,
         }
 
     # gets printed in begin_checkup
@@ -178,14 +172,12 @@ class Doctor(object):
             ValueError: if expected ot actual version is not in Major.Minor.Patch
                 format.
         """
-        # extract the major minor and patch from the version string
-        e_match = re.search(r'(\d+).(\d+).(\d)', expected)
-        a_match = re.search(r'(\d+).(\d+).(\d)', actual)
-        if e_match and a_match:
-            return all([int(a) >= int(e) for a, e in zip(a_match.groups(), e_match.groups())])
-
-        raise ValueError("Versions ({} & {}) do not match format MAJOR.MINOR.PATCH".format(
-            actual, expected))
+        if isinstance(parse_version(actual), SetuptoolsVersion):
+            # This handles versions that end in things like `rc0`
+            return parse_version(actual) >= parse_version(expected)
+        else:
+            # This handles versions that end in things like `-v7+` and `-generic`
+            return LooseVersion(actual) >= LooseVersion(expected)
 
     def checkup(self, check_type):
         """ Runs through all checks of the check_type given
@@ -244,10 +236,14 @@ class Doctor(object):
                                     The actaul two1 version installed on the system
         """
         check_str = "21 Tool Version"
-        expected_version = update.lookup_pypi_version()
+        url = parse.urljoin(two1.TWO1_PYPI_HOST, "api/package/{}/".format(two1.TWO1_PACKAGE_NAME))
+        response = requests.get(url)
+        versions = [package['version'] for package in response.json()['packages']]
+        stable_versions = [version for version in versions if not parse_version(version).is_prerelease]
+        latest_version = max(stable_versions, key=parse_version)
         actual_version = two1.TWO1_VERSION
 
-        if self.is_version_gte(actual_version, expected_version):
+        if self.is_version_gte(actual_version, latest_version):
             return Check.Result.PASS, check_str, actual_version
 
         return Check.Result.FAIL, check_str, actual_version
@@ -309,7 +305,7 @@ class Doctor(object):
 
         return Check.Result.FAIL, check_str, actual_py_version
 
-    def check_general_has_bitcoin_computer(self):
+    def check_BC_has_chip(self):
         """ Checks if the system has a 21 bitcoin shield
 
         Returns:
@@ -317,14 +313,11 @@ class Doctor(object):
                                     Human readable message describing the check
                                     "Yes" if the device has a bitcoin shield, "No" otherwise
         """
-        check_str = "Has Bitcoin Computer"
+        check_str = "Has Mining Chip"
         if bitcoin_computer.has_mining_chip():
             return Check.Result.PASS, check_str, "Yes"
-
-        if two1.TWO1_DEVICE_ID:
-            return Check.Result.FAIL, check_str, "No"
         else:
-            return Check.Result.WARN, check_str, "No"
+            return Check.Result.FAIL, check_str, "No"
 
     def check_general_ip_address(self):
         """ Checks if the system has an IP addressed assigned
@@ -402,7 +395,7 @@ class Doctor(object):
         else:
             return Check.Result.WARN, check_str, "zerotier-cli not installed"
 
-    def check_dependency_minerd_cli(self):
+    def check_BC_minerd_cli(self):
         """ Checks if minerd binary is installed on your system
 
         Returns:
@@ -415,11 +408,8 @@ class Doctor(object):
         minerd_cli = shutil.which("minerd")
         if minerd_cli:
             return Check.Result.PASS, check_str, minerd_cli
-
-        if two1.TWO1_DEVICE_ID:
-            return Check.Result.FAIL, check_str, "minerd not installed"
         else:
-            return Check.Result.WARN, check_str, "minerd not installed"
+            return Check.Result.FAIL, check_str, "minerd not installed"
 
     def check_dependency_wallet_cli(self):
         """ Checks if the two1 wallet is properly installed
@@ -551,7 +541,7 @@ class Doctor(object):
 
         return result, check_str, response.status_code
 
-    def check_server_raspbian_apt(self):
+    def check_BC_raspbian_apt(self):
         """ Checks if the raspbian mirror is up
 
         Returns:
@@ -574,8 +564,7 @@ class Doctor(object):
 @decorators.json_output
 @decorators.capture_usage
 def doctor(ctx):
-    """Checks on the health of the tool.
-    """
+    """ Diagnose this 21 installation."""
     return _doctor(ctx.obj['config'])
 
 
@@ -591,6 +580,8 @@ def _doctor(two1_config):
     doc.checkup("general")
     doc.checkup("dependency")
     doc.checkup("server")
+    if bitcoin_computer.get_device_uuid():
+        doc.checkup("BC")
 
     logger.info("\n" + uxstring.UxString.doctor_total)
 

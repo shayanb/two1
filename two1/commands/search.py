@@ -1,14 +1,15 @@
 """ Two1 command to search the 21 Marketplace """
 # standard python imports
-import datetime
 from textwrap import wrap
 import logging
+import json as jsonlib
 
 # 3rd party imports
 import click
 from tabulate import tabulate
 
 # two1 imports
+from two1 import util
 from two1.commands.util import exceptions
 from two1.commands.util import decorators
 from two1.commands.util import uxstring
@@ -20,11 +21,11 @@ logger = logging.getLogger(__name__)
 
 @click.command("search")
 @click.pass_context
-@click.argument('search_string', required=False)
+@click.argument('search_string', default=None, required=False)
 @decorators.catch_all
-@decorators.json_output
+@click.option('--json', default=False, is_flag=True, help='Uses JSON output.')
 @decorators.capture_usage
-def search(ctx, search_string=None):
+def search(ctx, search_string, json):
     """Search for apps listed on the 21 Marketplace.
 
 \b
@@ -46,7 +47,19 @@ Use 'n' to move to the next page and 'p' to move to the previous page.
 You can also enter an app id to view detailed information about the app.
 
     """
-    _search(ctx.obj['client'], search_string)
+    if json:
+        _search_json(ctx.obj['client'], search_string)
+    else:
+        _search(ctx.obj['client'], search_string)
+
+
+def _search_json(client, search_string):
+    resp = client.search(search_string)
+    total_pages = resp.json()['total_pages']
+    results = []
+    for i in range(total_pages):
+        results.extend(client.search(search_string, i).json()['results'])
+    logger.info(jsonlib.dumps(results, indent=4, separators=(',', ': ')))
 
 
 def _search(client, search_string):
@@ -153,7 +166,7 @@ def market_search_formatter(search_results):
             rows.append(["", l, "", "", "", ""])
         rows.append(["", "", "", "", "", ""])
 
-    return tabulate(rows, headers=headers, tablefmt="psql")
+    return tabulate(rows, headers=headers, tablefmt="simple")
 
 
 def get_next_page(prompt_response, current_page):
@@ -225,8 +238,7 @@ def display_search_info(client, listing_id):
         "{}".format(result_json["category"]))
     version = click.style("Version      : ", fg="blue") + click.style(
         "{}".format(result_json["version"]))
-    last_updated_str = datetime.datetime.fromtimestamp(
-        result_json["updated"]).strftime("%Y-%m-%d %H:%M")
+    last_updated_str = util.format_date(result_json["updated"])
     last_update = click.style("Last Update  : ", fg="blue") + click.style(
         "{}".format(last_updated_str))
     quick_start = click.style("Quick Start\n\n", fg="blue") + click.style(

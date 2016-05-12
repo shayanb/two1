@@ -1,12 +1,13 @@
-""" Log command that show a list of notifications """
+"""View a log of 21 CLI events."""
 # standart python imports
-from datetime import datetime
 import logging
 
 # 3rd party imports
 import click
 
 # two1 imports
+from two1 import util
+
 from two1.commands.util import decorators
 from two1.commands.util import uxstring
 
@@ -22,7 +23,7 @@ logger = logging.getLogger(__name__)
 @decorators.json_output
 @decorators.capture_usage
 def log(ctx, debug):
-    """Shows a list of events for your Bitcoin Computer"""
+    """View a log of events of earning/spending BTC."""
     prints = []
 
     logs = get_bc_logs(ctx.obj['client'], debug)
@@ -31,11 +32,11 @@ def log(ctx, debug):
     output = "\n".join(prints)
     logger.info(output, pager=True)
 
-    return logs
+    return tuple(map(click.unstyle, logs))
 
 
 def get_bc_logs(client, debug):
-    """ Gets a list of formatted logs messages
+    """Get a list of formatted log messages.
 
     Args:
         client (TwentyOneRestClient): rest client used for communication with the backend api.
@@ -74,7 +75,8 @@ def get_bc_logs(client, debug):
 
 def _get_headline(entry):
     # headline
-    local_date = datetime.fromtimestamp(entry["date"]).strftime("%Y-%m-%d %H:%M:%S")
+    local_date = util.format_date(entry["date"])
+
     if entry["amount"] > 0:
         headline = uxstring.UxString.debit_message.format(local_date, entry["amount"])
     elif entry["reason"] == "flush_payout" or entry["reason"] == "earning_payout":

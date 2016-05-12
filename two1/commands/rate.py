@@ -1,6 +1,5 @@
 """ Two1 command to rate a marketplace app """
 # standard python imports
-import datetime
 import logging
 
 # 3rd party imports
@@ -8,6 +7,7 @@ import click
 from tabulate import tabulate
 
 # two1 imports
+from two1 import util
 from two1.commands.util import uxstring
 from two1.commands.util import exceptions
 from two1.commands.util import decorators
@@ -45,7 +45,7 @@ $ 21 rate --list
     if list:
         _list(ctx.obj["client"])
     else:
-        if not (app_id and rating):
+        if not (app_id and isinstance(rating, int)):
             # print help and exit
             logger.info(ctx.command.help)
             return
@@ -72,13 +72,12 @@ def _list(client):
         ratings = ratings.json()["ratings"]
         rows = []
         for rating in ratings:
-            rating_date = datetime.datetime.fromtimestamp(
-                rating["rating_date"]).strftime("%Y-%m-%d %H:%M")
+            rating_date = util.format_date(rating["rating_date"])
             rating_score = "{}/5".format(rating["rating"])
             rows.append([rating["app_id"], rating["app_title"], rating["app_creator"],
                          rating_score, rating_date])
 
-        logger.info(tabulate(rows, headers, tablefmt="grid"))
+        logger.info(tabulate(rows, headers, tablefmt="simple"))
 
     except exceptions.ServerRequestError as e:
         if e.status_code == 404:
@@ -109,6 +108,9 @@ def _rate(client, app_id, rating):
     except exceptions.ServerRequestError as e:
         if e.status_code == 404:
             logger.info(uxstring.UxString.rating_app_not_found.format(app_id))
+            return
+        elif e.status_code == 400:
+            logger.info(e.data['error'])
             return
         raise e
 

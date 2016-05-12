@@ -1,6 +1,7 @@
 """Buy from a machine-payable endpoint."""
 # standart python imports
 import re
+import sys
 import json
 import urllib.parse
 import logging
@@ -13,7 +14,9 @@ import two1.channels as channels
 import two1.commands.util.uxstring as uxstring
 import two1.bitrequests as bitrequests
 import two1.commands.util.decorators as decorators
+import two1.wallet.exceptions as wallet_exceptions
 import two1.channels.statemachine as statemachine
+import two1.commands.util.bitcoin_computer as bitcoin_computer
 
 
 # Creates a ClickLogger
@@ -22,7 +25,9 @@ logger = logging.getLogger(__name__)
 
 @click.command()
 @click.argument('resource', nargs=2)
-@click.option('-i', '--info', 'info_only', default=False, is_flag=True, help="Retrieve initial 402 payment information.")
+@click.option(
+    '-i', '--info', 'info_only', default=False, is_flag=True, help="Retrieve initial 402 payment information."
+)
 @click.option('-p', '--payment-method', default='offchain', type=click.Choice(['offchain', 'onchain', 'channel']))
 @click.option('-H', '--header', multiple=True, default=None, help="HTTP header to include with the request")
 @click.option('-X', '--request', 'method', default='GET', help="HTTP request method")
@@ -34,17 +39,24 @@ logger = logging.getLogger(__name__)
 @decorators.catch_all
 @decorators.capture_usage
 def buy(ctx, resource, **options):
-    """Buy API calls with mined bitcoin.
+    """Buy API calls with bitcoin.
 
 \b
 Usage
 -----
+Buy a bitcoin-payable resource.
+$ 21 buy <resource>
+
+\b
 Get state, city, latitude, longitude, and estimated population for a given zip code.
 $ 21 buy "https://mkt.21.co/zipdata/collect?zip_code=94109" --maxprice 2750
 
 """
     # Get requested URL resource for `21 buy <URL>` syntax
     buy_url = resource[0]
+    if buy_url is None or buy_url is "":
+        logger.info(ctx.command.get_help(ctx))
+        sys.exit()
 
     # Backwards compatibility for `21 buy url <URL>` syntax
     if resource[0] == 'url':
@@ -53,7 +65,8 @@ $ 21 buy "https://mkt.21.co/zipdata/collect?zip_code=94109" --maxprice 2750
     _buy(ctx.obj['config'], ctx.obj['client'], ctx.obj['machine_auth'], buy_url, **options)
 
 
-def _buy(config, client, machine_auth, resource, info_only=False, payment_method='offchain', header=(), method='GET', output_file=None, data=None, data_file=None, maxprice=10000):
+def _buy(config, client, machine_auth, resource, info_only=False, payment_method='offchain', header=(),
+         method='GET', output_file=None, data=None, data_file=None, maxprice=10000):
     """Purchase a 402-enabled resource via CLI.
 
     This function attempts to purchase the requested resource using the
@@ -97,7 +110,9 @@ def _buy(config, client, machine_auth, resource, info_only=False, payment_method
 
     # Request user consent if they're creating a channel for the first time
     if payment_method == 'channel' and not requests._channelclient.list():
-        confirmed = click.confirm(uxstring.UxString.buy_channel_warning.format(requests.DEFAULT_DEPOSIT_AMOUNT, statemachine.PaymentChannelStateMachine.PAYMENT_TX_MIN_OUTPUT_AMOUNT), default=True)
+        confirmed = click.confirm(uxstring.UxString.buy_channel_warning.format(
+            requests.DEFAULT_DEPOSIT_AMOUNT, statemachine.PaymentChannelStateMachine.PAYMENT_TX_MIN_OUTPUT_AMOUNT
+        ), default=True)
         if not confirmed:
             raise click.ClickException(uxstring.UxString.buy_channel_aborted)
 
@@ -125,9 +140,18 @@ def _buy(config, client, machine_auth, resource, info_only=False, payment_method
 
     # Make the paid request for the resource
     try:
-        response = requests.request(method.lower(), resource, max_price=maxprice, data=data or data_file, headers=headers)
+        response = requests.request(
+            method.lower(), resource, max_price=maxprice, data=data or data_file, headers=headers
+        )
     except bitrequests.ResourcePriceGreaterThanMaxPriceError as e:
         raise click.ClickException(uxstring.UxString.Error.resource_price_greater_than_max_price.format(e))
+    except wallet_exceptions.DustLimitError as e:
+        raise click.ClickException(e)
+    except ValueError as e:
+        if bitcoin_computer.has_mining_chip():
+            raise click.ClickException(uxstring.UxString.Error.insufficient_funds_mine_more)
+        else:
+            raise click.ClickException(uxstring.UxString.Error.insufficient_funds_earn_more)
     except Exception as e:
         raise click.ClickException(e)
 
@@ -137,6 +161,8 @@ def _buy(config, client, machine_auth, resource, info_only=False, payment_method
     else:
         with open(output_file, 'wb') as f:
             logger.info(response.content, file=f, nl=False)
+
+    logger.info('', err=True)  # newline for pretty-printing errors to stdout
 
     # Exit successfully if no amount was paid for the resource (standard HTTP request)
     if not hasattr(response, 'amount_paid'):
@@ -148,13 +174,15 @@ def _buy(config, client, machine_auth, resource, info_only=False, payment_method
         logger.info(uxstring.UxString.buy_balances.format(response.amount_paid, '21.co', twentyone_balance), err=True)
     elif payment_method == 'onchain':
         onchain_balance = min(requests.wallet.confirmed_balance(), requests.wallet.unconfirmed_balance())
-        logger.info(uxstring.UxString.buy_balances.format(response.amount_paid, 'blockchain', onchain_balance), err=True)
+        logger.info(uxstring.UxString.buy_balances.format(response.amount_paid, 'blockchain', onchain_balance),
+                    err=True)
     elif payment_method == 'channel':
         channel_client = requests._channelclient
         channel_client.sync()
         channels_balance = sum(s.balance for s in (channel_client.status(url) for url in channel_client.list())
                                if s.state == channels.PaymentChannelState.READY)
-        logger.info(uxstring.UxString.buy_balances.format(response.amount_paid, 'payment channels', channels_balance), err=True)
+        logger.info(uxstring.UxString.buy_balances.format(response.amount_paid, 'payment channels', channels_balance),
+                    err=True)
 
 
 def _parse_post_data(data):

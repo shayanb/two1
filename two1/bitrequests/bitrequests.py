@@ -5,6 +5,7 @@ support the 402-protocol and those specific payment methods.
 """
 import time
 import json
+import codecs
 import logging
 import requests
 
@@ -182,8 +183,12 @@ class BitTransferRequests(BitRequests):
 
     def __init__(self, wallet, username=None):
         """Initialize the bittransfer with wallet and username."""
+        from two1.server.machine_auth_wallet import MachineAuthWallet
         super().__init__()
-        self.wallet = wallet
+        if isinstance(wallet, MachineAuthWallet):
+            self.wallet = wallet
+        else:
+            self.wallet = MachineAuthWallet(wallet)
         if username is None:
             import two1.commands.util.config as config
             self.username = config.Config().username
@@ -211,9 +216,14 @@ class BitTransferRequests(BitRequests):
             max_price_err = 'Resource price ({}) exceeds max price ({}).'
             raise ResourcePriceGreaterThanMaxPriceError(max_price_err.format(price, max_price))
 
+        # Get the signing public key
+        pubkey = self.wallet.get_public_key()
+        compressed_pubkey = codecs.encode(pubkey.compressed_bytes, 'base64').decode()
+
         # Create and sign BitTranfer
         bittransfer = json.dumps({
             'payer': self.username,
+            'payer_pubkey': compressed_pubkey,
             'payee_address': payee_address,
             'payee_username': payee_username,
             'amount': price,
